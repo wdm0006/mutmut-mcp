@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mutmut-mcp"
+version = "0.1.0"
+description = "MCP server for managing mutation testing with mutmut."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+   { name="Will McGinnis", email="will@mcginniscommawill.com" },
+]
+
+dependencies = [
+    "mcp[cli]",
+    "mutmut"
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff",
+    "pytest",
+    "uv"
+]
+
+[project.urls]
+"Homepage" = "https://github.com/wdm0006/mutmut-mcp"
+"Bug Tracker" = "https://github.com/wdm0006/mutmut-mcp/issues"
+
+[tool.ruff]
+line-length = 120
+select = ["E", "W", "F", "I", "C", "B"]
+ignore = ["E501", "C901"]
+
+[tool.ruff.format]
+quote-style = "double" 
