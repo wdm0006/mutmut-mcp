@@ -40,22 +40,6 @@ Or use with [uv](https://github.com/astral-sh/uv):
 uv run --with mcp --with mutmut mutmut_mcp.py
 ```
 
-### Example: Run Mutation Testing
-
-```python
-from mcp.client import MCPClient
-client = MCPClient("http://localhost:8000")
-result = client.call("run_mutmut", target="your_module")
-print(result)
-```
-
-### Example: Show Results
-
-```python
-result = client.call("show_results")
-print(result)
-```
-
 ## API / Tools
 
 The following tools are available:
