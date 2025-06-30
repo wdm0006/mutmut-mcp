@@ -1,4 +1,5 @@
 # Mutmut MCP
+[![smithery badge](https://smithery.ai/badge/@wdm0006/mutmut-mcp)](https://smithery.ai/server/@wdm0006/mutmut-mcp)
 
 A Model Context Protocol (MCP) server for managing mutation testing with [mutmut](https://mutmut.readthedocs.io/). This tool provides a set of programmatic APIs for running mutation tests, analyzing results, and improving test coverage in Python projects.
 
@@ -13,6 +14,15 @@ A Model Context Protocol (MCP) server for managing mutation testing with [mutmut
 
 ## Installation
 
+### Installing via Smithery
+
+To install mutmut-mcp for Claude Desktop automatically via [Smithery](https://smithery.ai/server/@wdm0006/mutmut-mcp):
+
+```bash
+npx -y @smithery/cli install @wdm0006/mutmut-mcp --client claude
+```
+
+### Manual Installation
 1. **Clone the repository:**
    ```sh
    git clone https://github.com/wdm0006/mutmut-mcp.git
