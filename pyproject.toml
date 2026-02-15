@@ -22,8 +22,11 @@ dependencies = [
 dev = [
     "ruff",
     "pytest",
-    "uv"
+    "pre-commit",
 ]
+
+[project.scripts]
+mutmut-mcp = "mutmut_mcp:main"
 
 [project.urls]
 "Homepage" = "https://github.com/wdm0006/mutmut-mcp"
@@ -31,8 +34,10 @@ dev = [
 
 [tool.ruff]
 line-length = 120
+
+[tool.ruff.lint]
 select = ["E", "W", "F", "I", "C", "B"]
 ignore = ["E501", "C901"]
 
 [tool.ruff.format]
-quote-style = "double" 
+quote-style = "double"

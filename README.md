@@ -12,7 +12,18 @@ A Model Context Protocol (MCP) server for managing mutation testing with [mutmut
 - Clean mutmut cache
 - Designed for automation and integration with other MCP tools
 
-## Installation
+## Install
+
+```bash
+# Run directly from GitHub (no install needed)
+uvx --from git+https://github.com/wdm0006/mutmut-mcp mutmut-mcp
+
+# Or install from source
+git clone https://github.com/wdm0006/mutmut-mcp
+cd mutmut-mcp
+uv sync
+uv run mutmut_mcp.py
+```
 
 ### Installing via Smithery
 
@@ -22,32 +33,17 @@ To install mutmut-mcp for Claude Desktop automatically via [Smithery](https://sm
 npx -y @smithery/cli install @wdm0006/mutmut-mcp --client claude
 ```
 
-### Manual Installation
-1. **Clone the repository:**
-   ```sh
-   git clone https://github.com/wdm0006/mutmut-mcp.git
-   cd mutmut-mcp
-   ```
-2. **Install dependencies:**
-   ```sh
-   python3 -m venv .venv
-   source .venv/bin/activate
-   pip install -U pip
-   pip install mcp[cli] mutmut
-   ```
+## MCP Client Configuration
 
-## Usage
-
-You can run the MCP server directly:
-
-```sh
-python mutmut_mcp.py
-```
-
-Or use with [uv](https://github.com/astral-sh/uv):
-
-```sh
-uv run --with mcp --with mutmut mutmut_mcp.py
+```json
+{
+  "mcpServers": {
+    "mutmut": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/wdm0006/mutmut-mcp", "mutmut-mcp"]
+    }
+  }
+}
 ```
 
 ## API / Tools
