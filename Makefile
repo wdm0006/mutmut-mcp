@@ -36,8 +36,8 @@ test: install
 
 # Run the MCP server
 run-server: install
-	@echo "--- Running MCP server (server.py)... ---"
-	$(UV) run python server/server.py
+	@echo "--- Running MCP server... ---"
+	$(UV) run python mutmut_mcp.py
 
 # Clean up the virtual environment and cache files
 clean:

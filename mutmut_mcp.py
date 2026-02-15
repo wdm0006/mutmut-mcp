@@ -3,7 +3,7 @@
 # requires-python = ">=3.10"
 # dependencies = [
 #   "pip",
-#   "mcp[cli]",
+#   "fastmcp>=2.14.0,<3.0.0",
 #   "mutmut"
 # ]
 # ///
@@ -13,19 +13,18 @@ Mutmut MCP Server
 
 This script provides a Model Context Protocol (MCP) server for managing mutation testing
 with mutmut. It offers tools to run mutation tests, analyze results, and guide users
-on improving test coverage for the pygeohash project.
+on improving test coverage.
 
 Dependencies for standalone execution with uv run:
-# uv run --with mcp --with mutmut mutmut_mcp.py
+# uv run --with fastmcp --with mutmut mutmut_mcp.py
 """
 
 import subprocess
 import os
 import json
-import pickle
 from typing import List, Dict, Any, Optional
 
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
 
 # Initialize the MCP server
 mcp = FastMCP("Mutmut Manager")
@@ -45,21 +44,17 @@ def _run_command(command: List[str]) -> str:
         return f"Exception occurred: {str(e)}"
 
 
-def _parse_mutmut_results() -> Dict[str, Any]:
-    """Helper function to parse mutmut results from cache or output file."""
-    if not os.path.exists(MUTMUT_CACHE_PATH):
-        return {"error": "No mutmut cache found. Run mutmut first."}
-    try:
-        with open(MUTMUT_CACHE_PATH, 'rb') as f:
-            return pickle.load(f)
-    except Exception as e:
-        return {"error": f"Failed to parse mutmut cache: {str(e)}"}
+def _get_mutmut_path(venv_path: str) -> str:
+    """Get the path to the mutmut binary in a virtual environment."""
+    if os.name != 'nt':
+        return os.path.join(venv_path, 'bin', 'mutmut')
+    return os.path.join(venv_path, 'Scripts', 'mutmut.exe')
 
 
 def _run_mutmut_cli(args: list, venv_path: Optional[str] = None) -> str:
     """Run mutmut CLI with given arguments, using venv if provided."""
     if venv_path:
-        mutmut_path = os.path.join(venv_path, 'bin', 'mutmut') if os.name != 'nt' else os.path.join(venv_path, 'Scripts', 'mutmut.exe')
+        mutmut_path = _get_mutmut_path(venv_path)
         if not os.path.exists(mutmut_path):
             return f"Error: mutmut not found in the specified venv at {mutmut_path}. Please ensure mutmut is installed in the venv."
         command = [mutmut_path] + args
@@ -69,38 +64,31 @@ def _run_mutmut_cli(args: list, venv_path: Optional[str] = None) -> str:
 
 
 @mcp.tool()
-def run_mutmut(target: str = "pygeohash", test_command: str = "pytest", options: str = "", venv_path: Optional[str] = None) -> str:
+def run_mutmut(target: str, options: str = "", venv_path: Optional[str] = None) -> str:
     """
     Run a full mutation testing session with mutmut on the specified target.
-    
-    This tool initiates mutation testing on the given module or package. You can provide 
-    additional mutmut options as needed. The output includes a summary of mutations tested, 
-    including counts of killed, survived, and timed-out mutations. If a virtual environment 
-    path is provided, mutmut will be run using the binaries from that environment to ensure 
+
+    This tool initiates mutation testing on the given module or package. You can provide
+    additional mutmut options as needed. The output includes a summary of mutations tested,
+    including counts of killed, survived, and timed-out mutations. If a virtual environment
+    path is provided, mutmut will be run using the binaries from that environment to ensure
     compatibility with project-specific dependencies.
-    
+
     Args:
-        target (str): The module or package to run mutation testing on. Defaults to 'pygeohash'.
-        test_command (str): Ignored for now. Kept for compatibility. Defaults to 'pytest'.
+        target (str): The module or package to run mutation testing on.
         options (str): Additional command-line options for mutmut (e.g., '--use-coverage'). Defaults to empty.
         venv_path (Optional[str]): Path to the project's virtual environment to use for running mutmut. Defaults to None.
-    
+
     Returns:
         str: Summary of the mutation testing run, or error message if the run fails.
     """
     if venv_path:
-        mutmut_path = os.path.join(venv_path, 'bin', 'mutmut') if os.name != 'nt' else os.path.join(venv_path, 'Scripts', 'mutmut.exe')
+        mutmut_path = _get_mutmut_path(venv_path)
         if not os.path.exists(mutmut_path):
             return f"Error: mutmut not found in the specified venv at {mutmut_path}. Please ensure mutmut is installed in the venv."
-        if target in ("pygeohash", ""):
-            command = [mutmut_path, "run"] + options.split()
-        else:
-            command = [mutmut_path, "run", target] + options.split()
+        command = [mutmut_path, "run", target] + options.split()
     else:
-        if target in ("pygeohash", ""):
-            command = ["mutmut", "run"] + options.split()
-        else:
-            command = ["mutmut", "run", target] + options.split()
+        command = ["mutmut", "run", target] + options.split()
     return _run_command(command)
 
 
@@ -183,7 +171,7 @@ def prioritize_survivors(venv_path: Optional[str] = None) -> dict:
     for line in survivors_output.splitlines():
         if not line.strip() or line.startswith('SURVIVED:') is False:
             continue
-        # Example line: SURVIVED: pygeohash.distances.x_geohash_approximate_distance:42 (some description)
+        # Example line: SURVIVED: mypackage.module.function_name:42 (some description)
         mutant_id = line.split(':', 1)[-1].strip()
         # Heuristic: deprioritize if log/debug, prioritize if in core logic
         if any(kw in line.lower() for kw in ["log", "debug", "print", "logger", "logging"]):
