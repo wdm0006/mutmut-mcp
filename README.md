@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/wdm0006-mutmut-mcp-badge.png)](https://mseep.ai/app/wdm0006-mutmut-mcp)
+
 # Mutmut MCP
 [![smithery badge](https://smithery.ai/badge/@wdm0006/mutmut-mcp)](https://smithery.ai/server/@wdm0006/mutmut-mcp)
 
