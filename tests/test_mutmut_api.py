@@ -1,8 +1,8 @@
-import tempfile
 from unittest.mock import MagicMock, patch
 
 from mutmut_mcp import (
     _get_mutmut_path,
+    _parse_results,
     _run_command,
     _run_mutmut_cli,
     clean_mutmut_cache,
@@ -12,6 +12,14 @@ from mutmut_mcp import (
     show_mutant,
     show_results,
     show_survivors,
+)
+
+# A realistic snippet of `mutmut results` output (mutmut 3.x format:
+# "    <mutant_name>: <status>", killed mutants omitted by default).
+RESULTS_OUTPUT = (
+    "    mymodule.x_core_logic__mutmut_1: survived\n"
+    "    mymodule.x_logger_setup__mutmut_1: survived\n"
+    "    mymodule.x_helper__mutmut_2: no tests\n"
 )
 
 # ---------------------------------------------------------------------------
@@ -86,31 +94,54 @@ class TestRunMutmutCli:
 
 
 # ---------------------------------------------------------------------------
-# run_mutmut
+# _parse_results
+# ---------------------------------------------------------------------------
+
+
+class TestParseResults:
+    def test_parses_name_and_status(self):
+        parsed = _parse_results(RESULTS_OUTPUT)
+        assert ("mymodule.x_core_logic__mutmut_1", "survived") in parsed
+        # "no tests" status has a space but the mutant name has none, so it splits cleanly.
+        assert ("mymodule.x_helper__mutmut_2", "no tests") in parsed
+
+    def test_ignores_blank_and_headerless_lines(self):
+        assert _parse_results("\n\nGenerating mutants\n") == []
+
+
+# ---------------------------------------------------------------------------
+# run_mutmut  (mutmut 3.x: `mutmut run [MUTANT_NAMES]...`)
 # ---------------------------------------------------------------------------
 
 
 class TestRunMutmut:
     @patch("mutmut_mcp._run_command")
-    def test_basic_run(self, mock_cmd):
-        mock_cmd.return_value = "5 mutants generated"
-        run_mutmut("mymodule.py")
+    def test_run_all(self, mock_cmd):
+        mock_cmd.return_value = "7/7"
+        run_mutmut()
+        assert mock_cmd.call_args[0][0] == ["mutmut", "run"]
+
+    @patch("mutmut_mcp._run_command")
+    def test_run_with_mutant_filter(self, mock_cmd):
+        mock_cmd.return_value = "1/1"
+        run_mutmut("mymodule.x_add__mutmut_1")
         call_args = mock_cmd.call_args[0][0]
-        assert "mutmut" in call_args
-        assert "run" in call_args
-        assert "mymodule.py" in call_args
+        assert call_args == ["mutmut", "run", "mymodule.x_add__mutmut_1"]
 
     @patch("mutmut_mcp._run_command")
     def test_run_with_options(self, mock_cmd):
         mock_cmd.return_value = "done"
-        run_mutmut("pkg", options="--use-coverage --timeout=10")
+        run_mutmut(options="--max-children 4")
         call_args = mock_cmd.call_args[0][0]
-        assert "--use-coverage" in call_args
-        assert "--timeout=10" in call_args
+        assert "--max-children" in call_args
+        assert "4" in call_args
+        # 2.x-only flags must never be emitted.
+        assert "--use-coverage" not in call_args
+        assert "--timeout" not in call_args
 
     @patch("mutmut_mcp.os.path.exists", return_value=False)
     def test_run_with_missing_venv(self, mock_exists):
-        result = run_mutmut("mod.py", venv_path="/bad/venv")
+        result = run_mutmut("mod", venv_path="/bad/venv")
         assert "Error" in result
 
 
@@ -121,20 +152,38 @@ class TestRunMutmut:
 
 class TestShowResults:
     @patch("mutmut_mcp._run_command")
-    def test_show_results(self, mock_cmd):
-        mock_cmd.return_value = "Killed: 10  Survived: 2"
+    def test_show_results_uses_results_command(self, mock_cmd):
+        mock_cmd.return_value = "    mod.x__mutmut_1: survived\n"
         result = show_results()
-        assert "Killed" in result
+        assert mock_cmd.call_args[0][0] == ["mutmut", "results"]
+        assert "survived" in result
+
+
+class TestShowSurvivors:
+    @patch("mutmut_mcp._run_command")
+    def test_lists_only_survived(self, mock_cmd):
+        mock_cmd.return_value = RESULTS_OUTPUT
+        result = show_survivors()
+        # Derived from `mutmut results`, never the removed `survivors` command.
+        assert mock_cmd.call_args[0][0] == ["mutmut", "results"]
+        assert "mymodule.x_core_logic__mutmut_1" in result
+        assert "mymodule.x_logger_setup__mutmut_1" in result
+        # "no tests" mutants are not survivors.
+        assert "x_helper__mutmut_2" not in result
 
     @patch("mutmut_mcp._run_command")
-    def test_show_survivors(self, mock_cmd):
-        mock_cmd.return_value = "SURVIVED: mod:42\nSURVIVED: mod:99\n"
-        result = show_survivors()
-        assert "SURVIVED" in result
+    def test_no_survivors(self, mock_cmd):
+        mock_cmd.return_value = "    mod.x__mutmut_1: no tests\n"
+        assert "No surviving mutants" in show_survivors()
+
+    @patch("mutmut_mcp._run_command")
+    def test_error_passthrough(self, mock_cmd):
+        mock_cmd.return_value = "Error: boom"
+        assert show_survivors() == "Error: boom"
 
 
 # ---------------------------------------------------------------------------
-# rerun_mutmut_on_survivor
+# rerun_mutmut_on_survivor  (mutmut 3.x: `mutmut run <mutant_name>`)
 # ---------------------------------------------------------------------------
 
 
@@ -142,47 +191,66 @@ class TestRerunMutmut:
     @patch("mutmut_mcp._run_command")
     def test_rerun_specific(self, mock_cmd):
         mock_cmd.return_value = "done"
-        rerun_mutmut_on_survivor(mutation_id="42")
+        rerun_mutmut_on_survivor(mutation_id="mymodule.x_add__mutmut_1")
         call_args = mock_cmd.call_args[0][0]
-        assert "--rerun" in call_args
-        assert "42" in call_args
+        assert call_args == ["mutmut", "run", "mymodule.x_add__mutmut_1"]
+        # 2.x rerun flags must never be emitted.
+        assert "--rerun" not in call_args
+        assert "--rerun-all" not in call_args
 
     @patch("mutmut_mcp._run_command")
-    def test_rerun_all(self, mock_cmd):
-        mock_cmd.return_value = "done"
+    def test_rerun_all_survivors(self, mock_cmd):
+        # First call: `mutmut results` (to find survivors); second: `mutmut run <names>`.
+        mock_cmd.side_effect = [RESULTS_OUTPUT, "done"]
         rerun_mutmut_on_survivor()
-        call_args = mock_cmd.call_args[0][0]
-        assert "--rerun-all" in call_args
+        run_call = mock_cmd.call_args_list[-1][0][0]
+        assert run_call[:2] == ["mutmut", "run"]
+        assert "mymodule.x_core_logic__mutmut_1" in run_call
+        assert "mymodule.x_logger_setup__mutmut_1" in run_call
+        assert "--rerun-all" not in run_call
+
+    @patch("mutmut_mcp._run_command")
+    def test_rerun_all_no_survivors(self, mock_cmd):
+        mock_cmd.return_value = ""
+        result = rerun_mutmut_on_survivor()
+        assert "No surviving mutants" in result
+        # Only the `results` probe ran; no `run` was issued.
+        assert mock_cmd.call_count == 1
 
 
 # ---------------------------------------------------------------------------
-# clean_mutmut_cache
+# clean_mutmut_cache  (mutmut 3.x stores state in a `mutants/` directory)
 # ---------------------------------------------------------------------------
 
 
 class TestCleanMutmutCache:
-    @patch("mutmut_mcp._run_mutmut_cli")
-    def test_cli_clean_success(self, mock_cli):
-        mock_cli.return_value = "Cache cleared"
-        result = clean_mutmut_cache()
-        assert "Cache cleared" in result
-
-    @patch("mutmut_mcp._run_mutmut_cli")
-    def test_fallback_removes_file(self, mock_cli):
-        mock_cli.return_value = "Error: unknown command"
-        # Create a temp cache file to simulate .mutmut-cache
-        with patch("mutmut_mcp.MUTMUT_CACHE_PATH", tempfile.mktemp()) as tmp:
-            with open(tmp, "w") as f:
-                f.write("cache")
+    def test_removes_mutants_dir(self, tmp_path):
+        state_dir = tmp_path / "mutants"
+        state_dir.mkdir()
+        (state_dir / "meta.json").write_text("{}")
+        with patch("mutmut_mcp.MUTMUT_STATE_DIR", str(state_dir)):
             result = clean_mutmut_cache()
-            assert "cleared" in result.lower() or "No mutmut cache" in result
+        assert not state_dir.exists()
+        assert "cleared" in result.lower()
 
-    @patch("mutmut_mcp._run_mutmut_cli")
-    def test_fallback_no_cache(self, mock_cli):
-        mock_cli.return_value = "Error: unknown command"
-        with patch("mutmut_mcp.MUTMUT_CACHE_PATH", "/tmp/nonexistent_mutmut_cache_xyz"):
+    def test_removes_legacy_cache_file(self, tmp_path):
+        legacy = tmp_path / ".mutmut-cache"
+        legacy.write_text("cache")
+        with (
+            patch("mutmut_mcp.MUTMUT_STATE_DIR", str(tmp_path / "mutants")),
+            patch("mutmut_mcp.MUTMUT_LEGACY_CACHE_PATH", str(legacy)),
+        ):
             result = clean_mutmut_cache()
-            assert "no mutmut cache" in result.lower()
+        assert not legacy.exists()
+        assert "cleared" in result.lower()
+
+    def test_no_state(self, tmp_path):
+        with (
+            patch("mutmut_mcp.MUTMUT_STATE_DIR", str(tmp_path / "mutants")),
+            patch("mutmut_mcp.MUTMUT_LEGACY_CACHE_PATH", str(tmp_path / ".mutmut-cache")),
+        ):
+            result = clean_mutmut_cache()
+        assert "no mutmut state" in result.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +262,8 @@ class TestShowMutant:
     @patch("mutmut_mcp._run_command")
     def test_show_mutant(self, mock_cmd):
         mock_cmd.return_value = "--- a/mod.py\n+++ b/mod.py\n-  x = 1\n+  x = 2"
-        result = show_mutant("42")
+        result = show_mutant("mymodule.x_add__mutmut_1")
+        assert mock_cmd.call_args[0][0] == ["mutmut", "show", "mymodule.x_add__mutmut_1"]
         assert "mod.py" in result
 
     def test_empty_mutation_id(self):
@@ -208,26 +277,34 @@ class TestShowMutant:
 
 
 class TestPrioritizeSurvivors:
-    @patch("mutmut_mcp.show_survivors")
-    def test_no_survivors(self, mock_surv):
-        mock_surv.return_value = "No surviving mutants found."
+    @patch("mutmut_mcp.show_results")
+    def test_no_survivors(self, mock_results):
+        mock_results.return_value = "    mod.x__mutmut_1: no tests\n"
         result = prioritize_survivors()
         assert result["prioritized"] == []
 
-    @patch("mutmut_mcp.show_survivors")
-    def test_prioritizes_correctly(self, mock_surv):
-        mock_surv.return_value = (
-            "SURVIVED: mymodule.core_logic:42 (changed operator)\n"
-            "SURVIVED: mymodule.logger_setup:10 (changed logging call)\n"
-        )
+    @patch("mutmut_mcp.show_results")
+    def test_prioritizes_correctly(self, mock_results):
+        mock_results.return_value = RESULTS_OUTPUT
         result = prioritize_survivors()
+        # Only the two `survived` mutants are considered.
         assert len(result["prioritized"]) == 2
-        # Core logic should score higher than logging
+        # Core logic ranks above the logger survivor (log/debug is deprioritized).
+        top = result["prioritized"][0]
+        assert top["mutant_id"] == "mymodule.x_core_logic__mutmut_1"
+        assert top["score"] == 1
         scores = [p["score"] for p in result["prioritized"]]
         assert scores[0] >= scores[1]
 
-    @patch("mutmut_mcp.show_survivors")
-    def test_empty_output(self, mock_surv):
-        mock_surv.return_value = ""
+    @patch("mutmut_mcp.show_results")
+    def test_empty_output(self, mock_results):
+        mock_results.return_value = ""
         result = prioritize_survivors()
         assert result["prioritized"] == []
+
+    @patch("mutmut_mcp.show_results")
+    def test_error_passthrough(self, mock_results):
+        mock_results.return_value = "Error: boom"
+        result = prioritize_survivors()
+        assert result["prioritized"] == []
+        assert "boom" in result["message"]
