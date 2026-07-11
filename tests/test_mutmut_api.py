@@ -26,11 +26,14 @@ class TestRunCommand:
         assert _run_command(["echo", "ok"]) == "ok\n"
 
     @patch("mutmut_mcp.subprocess.run")
-    def test_nonzero_exit(self, mock_run):
+    def test_nonzero_exit_with_stdout(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=1, stdout="survived: 2\n", stderr="")
+        assert _run_command(["mutmut", "run"]) == "survived: 2\n"
+
+    @patch("mutmut_mcp.subprocess.run")
+    def test_nonzero_exit_with_stderr_only(self, mock_run):
         mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="fail\n")
-        result = _run_command(["false"])
-        assert "Error" in result
-        assert "fail" in result
+        assert _run_command(["false"]) == "Error: fail\n"
 
     @patch("mutmut_mcp.subprocess.run", side_effect=FileNotFoundError("not found"))
     def test_exception(self, mock_run):

@@ -36,8 +36,9 @@ def _run_command(command: List[str]) -> str:
     """Helper function to run a shell command and return output or error."""
     try:
         result = subprocess.run(command, shell=False, capture_output=True, text=True)
-        if result.returncode != 0:
-            return f"Error: {result.stderr}"
+        if result.stderr:
+            separator = "" if not result.stdout or result.stdout.endswith("\n") else "\n"
+            return f"{result.stdout}{separator}Error: {result.stderr}"
         return result.stdout
     except Exception as e:
         return f"Exception occurred: {str(e)}"
