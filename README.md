@@ -50,12 +50,13 @@ npx -y @smithery/cli install @wdm0006/mutmut-mcp --client claude
 
 The following tools are available:
 
-- `run_mutmut(target, test_command="pytest", options="", venv_path=None)` – Run mutation testing
+- `run_mutmut(target, options="", venv_path=None)` – Run a mutation testing session on the target
 - `show_results(venv_path=None)` – Show overall results
 - `show_survivors(venv_path=None)` – List surviving mutations
-- `generate_test_suggestion(venv_path=None)` – Suggest areas needing better test coverage
-- `rerun_mutmut_on_survivor(mutation_id=None, venv_path=None)` – Rerun mutmut on survivors
+- `rerun_mutmut_on_survivor(mutation_id=None, venv_path=None)` – Rerun mutmut on a specific survivor or all survivors
 - `clean_mutmut_cache(venv_path=None)` – Clean mutmut cache
+- `show_mutant(mutation_id, venv_path=None)` – Show the code diff and details for a specific mutant
+- `prioritize_survivors(venv_path=None)` – Rank surviving mutants by likely materiality
 
 ## License
 
