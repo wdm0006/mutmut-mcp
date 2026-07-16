@@ -47,3 +47,13 @@ def test_clean_removes_real_state_dir(mutmut_project):
     result = clean_mutmut_cache()
     assert not os.path.isdir("mutants")
     assert "cleared" in result.lower()
+
+
+def test_show_results_against_explicit_project_path(mutmut_project, tmp_path_factory, monkeypatch):
+    # Run from a directory that is NOT the project, proving project_path (not the CWD)
+    # is what mutmut is pointed at.
+    elsewhere = tmp_path_factory.mktemp("elsewhere")
+    monkeypatch.chdir(elsewhere)
+    result = show_results(project_path=str(mutmut_project))
+    assert not result.startswith("Error")
+    assert not result.startswith("Exception")

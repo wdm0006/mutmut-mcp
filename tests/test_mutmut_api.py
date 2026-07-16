@@ -1,3 +1,4 @@
+import os
 from unittest.mock import MagicMock, patch
 
 from mutmut_mcp import (
@@ -76,7 +77,7 @@ class TestRunMutmutCli:
     def test_without_venv(self, mock_cmd):
         mock_cmd.return_value = "results"
         result = _run_mutmut_cli(["results"])
-        mock_cmd.assert_called_once_with(["mutmut", "results"])
+        mock_cmd.assert_called_once_with(["mutmut", "results"], cwd=None)
         assert result == "results"
 
     @patch("mutmut_mcp.os.path.exists", return_value=True)
@@ -94,6 +95,79 @@ class TestRunMutmutCli:
         result = _run_mutmut_cli(["results"], venv_path="/missing/venv")
         assert "Error" in result
         assert "not found" in result
+
+
+# ---------------------------------------------------------------------------
+# project_path scoping
+# ---------------------------------------------------------------------------
+
+
+class TestProjectPath:
+    @patch("mutmut_mcp.subprocess.run")
+    def test_run_command_passes_cwd(self, mock_run, tmp_path):
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok\n", stderr="")
+        _run_command(["mutmut", "results"], cwd=str(tmp_path))
+        assert mock_run.call_args.kwargs["cwd"] == str(tmp_path)
+
+    @patch("mutmut_mcp.subprocess.run")
+    def test_run_command_defaults_to_no_cwd(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok\n", stderr="")
+        _run_command(["mutmut", "results"])
+        assert mock_run.call_args.kwargs["cwd"] is None
+
+    @patch("mutmut_mcp._run_command")
+    def test_cli_runs_in_project_path(self, mock_cmd, tmp_path):
+        mock_cmd.return_value = "results"
+        _run_mutmut_cli(["results"], project_path=str(tmp_path))
+        assert mock_cmd.call_args.kwargs["cwd"] == str(tmp_path)
+
+    @patch("mutmut_mcp._run_command")
+    def test_relative_venv_resolved_against_project_path(self, mock_cmd, tmp_path):
+        bin_dir = tmp_path / ".venv" / ("Scripts" if os.name == "nt" else "bin")
+        bin_dir.mkdir(parents=True)
+        binary = bin_dir / ("mutmut.exe" if os.name == "nt" else "mutmut")
+        binary.write_text("")
+        mock_cmd.return_value = "results"
+
+        _run_mutmut_cli(["results"], venv_path=".venv", project_path=str(tmp_path))
+
+        assert mock_cmd.call_args[0][0][0] == str(binary)
+        assert mock_cmd.call_args.kwargs["cwd"] == str(tmp_path)
+
+    @patch("mutmut_mcp._run_command")
+    @patch("mutmut_mcp.os.path.exists", return_value=True)
+    def test_absolute_venv_not_rebased_on_project_path(self, mock_exists, mock_cmd, tmp_path):
+        mock_cmd.return_value = "results"
+        _run_mutmut_cli(["results"], venv_path="/abs/venv", project_path=str(tmp_path))
+        assert mock_cmd.call_args[0][0][0].startswith("/abs/venv")
+
+    @patch("mutmut_mcp._run_command")
+    def test_missing_project_path_errors_without_running(self, mock_cmd, tmp_path):
+        result = _run_mutmut_cli(["results"], project_path=str(tmp_path / "nope"))
+        assert "Error" in result
+        assert "not an existing directory" in result
+        mock_cmd.assert_not_called()
+
+    @patch("mutmut_mcp._run_command")
+    def test_file_project_path_errors_without_running(self, mock_cmd, tmp_path):
+        a_file = tmp_path / "setup.cfg"
+        a_file.write_text("[mutmut]\n")
+        result = show_results(project_path=str(a_file))
+        assert "Error" in result
+        mock_cmd.assert_not_called()
+
+    @patch("mutmut_mcp._run_command")
+    def test_tools_thread_project_path(self, mock_cmd, tmp_path):
+        mock_cmd.return_value = RESULTS_OUTPUT
+        project = str(tmp_path)
+        run_mutmut(project_path=project)
+        show_results(project_path=project)
+        show_survivors(project_path=project)
+        show_mutant("mymodule.x_add__mutmut_1", project_path=project)
+        rerun_mutmut_on_survivor(mutation_id="mymodule.x_add__mutmut_1", project_path=project)
+        prioritize_survivors(project_path=project)
+        assert mock_cmd.call_count == 6
+        assert all(call.kwargs["cwd"] == project for call in mock_cmd.call_args_list)
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +328,34 @@ class TestCleanMutmutCache:
         ):
             result = clean_mutmut_cache()
         assert "no mutmut state" in result.lower()
+
+    def test_cleans_only_the_requested_project(self, tmp_path):
+        # Two independent projects, each with their own mutmut state.
+        target, other = tmp_path / "target", tmp_path / "other"
+        for project in (target, other):
+            (project / "mutants").mkdir(parents=True)
+            (project / "mutants" / "meta.json").write_text("{}")
+            (project / ".mutmut-cache").write_text("cache")
+
+        result = clean_mutmut_cache(project_path=str(target))
+
+        assert "cleared" in result.lower()
+        assert not (target / "mutants").exists()
+        assert not (target / ".mutmut-cache").exists()
+        # The unrelated project's state must be untouched.
+        assert (other / "mutants" / "meta.json").read_text() == "{}"
+        assert (other / ".mutmut-cache").read_text() == "cache"
+
+    def test_missing_project_path_errors_and_deletes_nothing(self, tmp_path, monkeypatch):
+        # State exists in the server's CWD; a bad project_path must not fall back to it.
+        (tmp_path / "mutants").mkdir()
+        (tmp_path / "mutants" / "meta.json").write_text("{}")
+        monkeypatch.chdir(tmp_path)
+
+        result = clean_mutmut_cache(project_path=str(tmp_path / "does-not-exist"))
+
+        assert "Error" in result
+        assert (tmp_path / "mutants" / "meta.json").exists()
 
 
 # ---------------------------------------------------------------------------
