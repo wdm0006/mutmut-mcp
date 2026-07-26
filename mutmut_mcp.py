@@ -72,6 +72,8 @@ def _run_mutmut_cli(args: list, venv_path: Optional[str] = None, project_path: O
     error = _validate_project_path(project_path)
     if error:
         return error
+    if project_path:
+        project_path = os.path.abspath(project_path)
     if venv_path:
         mutmut_path = _get_mutmut_path(_resolve_venv_path(venv_path, project_path))
         if not os.path.exists(mutmut_path):
