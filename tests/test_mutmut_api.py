@@ -1,6 +1,8 @@
 import os
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from mutmut_mcp import (
     _get_mutmut_path,
     _parse_results,
@@ -133,6 +135,20 @@ class TestProjectPath:
 
         assert mock_cmd.call_args[0][0][0] == str(binary)
         assert mock_cmd.call_args.kwargs["cwd"] == str(tmp_path)
+
+    @pytest.mark.skipif(os.name == "nt", reason="test executable uses a POSIX shell script")
+    def test_relative_project_and_venv_share_absolute_project_base(self, tmp_path, monkeypatch):
+        project = tmp_path / "project"
+        bin_dir = project / ".venv" / "bin"
+        bin_dir.mkdir(parents=True)
+        binary = bin_dir / "mutmut"
+        binary.write_text("#!/bin/sh\npwd\n")
+        binary.chmod(0o755)
+        monkeypatch.chdir(tmp_path)
+
+        result = _run_mutmut_cli(["results"], venv_path=".venv", project_path="project")
+
+        assert result.strip() == str(project)
 
     @patch("mutmut_mcp._run_command")
     @patch("mutmut_mcp.os.path.exists", return_value=True)
