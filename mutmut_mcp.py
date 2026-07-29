@@ -302,8 +302,6 @@ def prioritize_survivors(venv_path: Optional[str] = None, project_path: Optional
     return {"prioritized": prioritized, "message": "Survivors prioritized by likely materiality."}
 
 
-
-
 def main():
     """Entry point for the Mutmut MCP server."""
     mcp.run()
