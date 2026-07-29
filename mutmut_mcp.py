@@ -84,6 +84,7 @@ def _run_mutmut_cli(args: list, venv_path: Optional[str] = None, project_path: O
     return _run_command(command, cwd=project_path)
 
 
+@mcp.tool()
 def run_mutmut(
     target: str = "", options: str = "", venv_path: Optional[str] = None, project_path: Optional[str] = None
 ) -> str:
@@ -115,6 +116,7 @@ def run_mutmut(
     return _run_mutmut_cli(args, venv_path, project_path)
 
 
+@mcp.tool()
 def show_results(venv_path: Optional[str] = None, project_path: Optional[str] = None) -> str:
     """
     Display overall results from the last mutmut run using the mutmut CLI.
@@ -162,6 +164,7 @@ def _survivor_names(venv_path: Optional[str] = None, project_path: Optional[str]
     return names, ""
 
 
+@mcp.tool()
 def show_survivors(venv_path: Optional[str] = None, project_path: Optional[str] = None) -> str:
     """
     List surviving mutants from the last mutmut run.
@@ -184,6 +187,7 @@ def show_survivors(venv_path: Optional[str] = None, project_path: Optional[str] 
     return "\n".join(names)
 
 
+@mcp.tool()
 def rerun_mutmut_on_survivor(
     mutation_id: Optional[str] = None, venv_path: Optional[str] = None, project_path: Optional[str] = None
 ) -> str:
@@ -211,6 +215,7 @@ def rerun_mutmut_on_survivor(
     return _run_mutmut_cli(["run", *names], venv_path, project_path)
 
 
+@mcp.tool()
 def clean_mutmut_cache(venv_path: Optional[str] = None, project_path: Optional[str] = None) -> str:
     """
     Remove mutmut's on-disk state so the next run starts fresh.
@@ -244,6 +249,7 @@ def clean_mutmut_cache(venv_path: Optional[str] = None, project_path: Optional[s
     return "No mutmut state found to clear."
 
 
+@mcp.tool()
 def show_mutant(mutation_id: str, venv_path: Optional[str] = None, project_path: Optional[str] = None) -> str:
     """
     Show the code diff and details for a specific mutant using mutmut show.
@@ -261,6 +267,7 @@ def show_mutant(mutation_id: str, venv_path: Optional[str] = None, project_path:
     return _run_mutmut_cli(["show", mutation_id], venv_path, project_path)
 
 
+@mcp.tool()
 def prioritize_survivors(venv_path: Optional[str] = None, project_path: Optional[str] = None) -> dict:
     """
     Prioritize surviving mutants by likely materiality, filtering out log/debug-only changes and ranking by potential impact.
@@ -295,14 +302,6 @@ def prioritize_survivors(venv_path: Optional[str] = None, project_path: Optional
     return {"prioritized": prioritized, "message": "Survivors prioritized by likely materiality."}
 
 
-# --- Register tools with MCP server (explicit registration keeps functions callable) ---
-mcp.tool()(run_mutmut)
-mcp.tool()(show_results)
-mcp.tool()(show_survivors)
-mcp.tool()(rerun_mutmut_on_survivor)
-mcp.tool()(clean_mutmut_cache)
-mcp.tool()(show_mutant)
-mcp.tool()(prioritize_survivors)
 
 
 def main():
