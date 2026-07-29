@@ -33,6 +33,10 @@ mcp = FastMCP("Mutmut Manager")
 MUTMUT_STATE_DIR = "mutants"
 MUTMUT_LEGACY_CACHE_PATH = ".mutmut-cache"
 
+# `mutmut results` statuses this server reasons about.
+STATUS_SURVIVED = "survived"
+STATUS_NO_TESTS = "no tests"
+
 
 def _run_command(command: List[str], cwd: Optional[str] = None) -> str:
     """Helper function to run a shell command and return output or error."""
@@ -149,26 +153,41 @@ def _parse_results(output: str) -> List[tuple]:
     return parsed
 
 
+def _names_by_status(venv_path: Optional[str] = None, project_path: Optional[str] = None) -> tuple:
+    """Return (names_by_status, error) from a single `mutmut results` call.
+
+    `names_by_status` maps each status mutmut reported ('survived', 'no tests', ...) to the
+    mutant names carrying it, in the order mutmut printed them. `error` is a non-empty string
+    when the underlying call failed; in that case the mapping is empty.
+    """
+    output = show_results(venv_path, project_path)
+    if output.startswith("Error") or output.startswith("Exception"):
+        return {}, output
+    grouped: dict = {}
+    for name, status in _parse_results(output):
+        grouped.setdefault(status, []).append(name)
+    return grouped, ""
+
+
 def _survivor_names(venv_path: Optional[str] = None, project_path: Optional[str] = None) -> tuple:
     """Return (survivor_names, error). Survivors are mutants with status 'survived'.
 
     `error` is a non-empty string when the underlying `mutmut results` call failed;
     in that case `survivor_names` is empty.
     """
-    output = show_results(venv_path, project_path)
-    if output.startswith("Error") or output.startswith("Exception"):
-        return [], output
-    names = [name for name, status in _parse_results(output) if status == "survived"]
-    return names, ""
+    grouped, error = _names_by_status(venv_path, project_path)
+    return grouped.get(STATUS_SURVIVED, []), error
 
 
 def show_survivors(venv_path: Optional[str] = None, project_path: Optional[str] = None) -> str:
     """
-    List surviving mutants from the last mutmut run.
+    List surviving and uncovered mutants from the last mutmut run.
 
-    mutmut 3.x has no `survivors` command, so this derives survivors from `mutmut results`
-    (the mutants whose status is 'survived'). Returns one mutant name per line, or a message
-    when there are none.
+    mutmut 3.x has no `survivors` command, so this derives everything from `mutmut results`.
+    Survivors (status 'survived') are listed first, one name per line. Mutants that no test
+    exercises at all (status 'no tests') follow in a separate labelled section — they are not
+    survivors, but they are the strongest signal of a coverage gap, so they are never dropped.
+    'No surviving mutants found.' means every mutant has a definite, covered result.
 
     Args:
         venv_path (Optional[str]): Path to the project's virtual environment. A relative path is
@@ -176,12 +195,19 @@ def show_survivors(venv_path: Optional[str] = None, project_path: Optional[str] 
         project_path (Optional[str]): Directory holding the project's mutmut configuration and state.
             Defaults to the server's working directory.
     """
-    names, error = _survivor_names(venv_path, project_path)
+    grouped, error = _names_by_status(venv_path, project_path)
     if error:
         return error
-    if not names:
+    survivors = grouped.get(STATUS_SURVIVED, [])
+    uncovered = grouped.get(STATUS_NO_TESTS, [])
+    if not survivors and not uncovered:
         return "No surviving mutants found."
-    return "\n".join(names)
+    sections = []
+    if survivors:
+        sections.append("\n".join(survivors))
+    if uncovered:
+        sections.append(f"Not covered by any test ({len(uncovered)}):\n" + "\n".join(uncovered))
+    return "\n\n".join(sections)
 
 
 def rerun_mutmut_on_survivor(
@@ -263,8 +289,12 @@ def show_mutant(mutation_id: str, venv_path: Optional[str] = None, project_path:
 
 def prioritize_survivors(venv_path: Optional[str] = None, project_path: Optional[str] = None) -> dict:
     """
-    Prioritize surviving mutants by likely materiality, filtering out log/debug-only changes and ranking by potential impact.
-    Returns a sorted list of survivors with reasons for prioritization.
+    Rank the mutants worth acting on from the last mutmut run, highest score first.
+
+    Each entry carries a `status`: 'no tests' for a mutant no test exercises at all, or
+    'survived' for one a test ran but failed to detect. Scores are a rank, not a flag —
+    2 = uncovered, 1 = likely-material survivor, 0 = likely log/debug-only survivor — so
+    coverage gaps sort above survivors and log/debug names sort last.
 
     Args:
         venv_path (Optional[str]): Path to the project's virtual environment. A relative path is
@@ -272,14 +302,26 @@ def prioritize_survivors(venv_path: Optional[str] = None, project_path: Optional
         project_path (Optional[str]): Directory holding the project's mutmut configuration and state.
             Defaults to the server's working directory.
     """
-    names, error = _survivor_names(venv_path, project_path)
+    grouped, error = _names_by_status(venv_path, project_path)
     if error:
         return {"prioritized": [], "message": error}
-    if not names:
+    survivors = grouped.get(STATUS_SURVIVED, [])
+    uncovered = grouped.get(STATUS_NO_TESTS, [])
+    if not survivors and not uncovered:
         return {"prioritized": [], "message": "No surviving mutants found."}
     noise_tokens = {"log", "debug", "print", "logger", "logging"}
     prioritized = []
-    for name in names:
+    for name in uncovered:
+        prioritized.append(
+            {
+                "mutant_id": name,
+                "score": 2,
+                "reason": "No test covers this mutant.",
+                "raw": name,
+                "status": STATUS_NO_TESTS,
+            }
+        )
+    for name in survivors:
         # Heuristic: deprioritize survivors in log/debug code, prioritize likely-material logic.
         # Match whole name tokens (split on '.'/'_') so "logic" isn't mistaken for "log".
         tokens = set(name.lower().replace(".", "_").split("_"))
@@ -289,10 +331,20 @@ def prioritize_survivors(venv_path: Optional[str] = None, project_path: Optional
         else:
             reason = "Potentially material logic, prioritize."
             score = 1
-        prioritized.append({"mutant_id": name, "score": score, "reason": reason, "raw": name})
-    # Sort by score descending (material first)
+        prioritized.append(
+            {"mutant_id": name, "score": score, "reason": reason, "raw": name, "status": STATUS_SURVIVED}
+        )
+    # Sort by score descending (uncovered first, then material survivors); stable, so the
+    # order within each score band is the order mutmut reported.
     prioritized.sort(key=lambda x: x["score"], reverse=True)
-    return {"prioritized": prioritized, "message": "Survivors prioritized by likely materiality."}
+    if uncovered:
+        message = (
+            f"{len(uncovered)} mutant(s) not covered by any test, ranked above "
+            f"{len(survivors)} survivor(s) prioritized by likely materiality."
+        )
+    else:
+        message = "Survivors prioritized by likely materiality."
+    return {"prioritized": prioritized, "message": message}
 
 
 # --- Register tools with MCP server (explicit registration keeps functions callable) ---

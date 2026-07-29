@@ -52,11 +52,11 @@ The following tools are available:
 
 - `run_mutmut(target, options="", venv_path=None, project_path=None)` – Run a mutation testing session on the target
 - `show_results(venv_path=None, project_path=None)` – Show overall results
-- `show_survivors(venv_path=None, project_path=None)` – List surviving mutations
+- `show_survivors(venv_path=None, project_path=None)` – List surviving mutations, plus a labelled section for mutants no test covers
 - `rerun_mutmut_on_survivor(mutation_id=None, venv_path=None, project_path=None)` – Rerun mutmut on a specific survivor or all survivors
 - `clean_mutmut_cache(venv_path=None, project_path=None)` – Clean mutmut cache
 - `show_mutant(mutation_id, venv_path=None, project_path=None)` – Show the code diff and details for a specific mutant
-- `prioritize_survivors(venv_path=None, project_path=None)` – Rank surviving mutants by likely materiality
+- `prioritize_survivors(venv_path=None, project_path=None)` – Rank uncovered mutants and survivors by likely materiality
 
 ### `project_path`
 
