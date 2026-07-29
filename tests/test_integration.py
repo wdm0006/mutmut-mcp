@@ -11,7 +11,14 @@ import shutil
 
 import pytest
 
-from mutmut_mcp import clean_mutmut_cache, show_results, show_survivors
+from mutmut_mcp import (
+    _parse_results,
+    clean_mutmut_cache,
+    prioritize_survivors,
+    run_mutmut,
+    show_results,
+    show_survivors,
+)
 
 pytestmark = pytest.mark.skipif(shutil.which("mutmut") is None, reason="mutmut CLI not installed")
 
@@ -47,6 +54,61 @@ def test_clean_removes_real_state_dir(mutmut_project):
     result = clean_mutmut_cache()
     assert not os.path.isdir("mutants")
     assert "cleared" in result.lower()
+
+
+@pytest.fixture()
+def partly_tested_project(tmp_path, monkeypatch):
+    """A project mixing a well-tested function, a weakly-tested one, and an untested one.
+
+    `add` is killed, `scale` survives (the assertion holds for every mutant of `x * 2`),
+    and nothing imports `untested_discount` at all, so its mutants come back as `no tests`.
+    """
+    (tmp_path / "foo.py").write_text(
+        "def add(a, b):\n"
+        "    return a + b\n\n\n"
+        "def scale(x):\n"
+        "    return x * 2\n\n\n"
+        "def untested_discount(price):\n"
+        "    return price * 0.9\n"
+    )
+    (tmp_path / "test_foo.py").write_text(
+        "from foo import add, scale\n\n\n"
+        "def test_add():\n"
+        "    assert add(1, 2) == 3\n\n\n"
+        "def test_scale():\n"
+        "    assert scale(0) == 0\n"
+    )
+    (tmp_path / "setup.cfg").write_text("[mutmut]\npaths_to_mutate=foo.py\n")
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
+
+
+def test_uncovered_mutants_reported_after_real_run(partly_tested_project):
+    """A real `mutmut run`: mutants of a function no test touches must not be dropped.
+
+    Only the `no tests` mutants are asserted on. Statuses that require forking a test
+    worker (`survived`/`killed`) are intermittently reported as `segfault` on some
+    platforms even at --max-children 1, whereas an uncovered mutant never forks one and
+    is stable. The exact ranking of survivors is pinned by the unit tests instead.
+    """
+    run_mutmut(options="--max-children 1")
+
+    results = show_results()
+    uncovered = [name for name, status in _parse_results(results) if status == "no tests"]
+    assert sorted(uncovered) == ["foo.x_untested_discount__mutmut_1", "foo.x_untested_discount__mutmut_2"], results
+
+    survivors_output = show_survivors()
+    assert survivors_output != "No surviving mutants found."
+    assert f"Not covered by any test ({len(uncovered)}):" in survivors_output
+    for name in uncovered:
+        assert name in survivors_output
+
+    prioritized = prioritize_survivors()["prioritized"]
+    uncovered_entries = [p for p in prioritized if p["status"] == "no tests"]
+    assert sorted(p["mutant_id"] for p in uncovered_entries) == sorted(uncovered)
+    assert all(p["score"] == 2 for p in uncovered_entries)
+    # Uncovered mutants occupy the top of the ranking, ahead of any survivor mutmut found.
+    assert prioritized[: len(uncovered_entries)] == uncovered_entries
 
 
 def test_show_results_against_explicit_project_path(mutmut_project, tmp_path_factory, monkeypatch):

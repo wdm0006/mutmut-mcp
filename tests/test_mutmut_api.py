@@ -5,9 +5,11 @@ import pytest
 
 from mutmut_mcp import (
     _get_mutmut_path,
+    _names_by_status,
     _parse_results,
     _run_command,
     _run_mutmut_cli,
+    _survivor_names,
     clean_mutmut_cache,
     prioritize_survivors,
     rerun_mutmut_on_survivor,
@@ -203,6 +205,37 @@ class TestParseResults:
 
 
 # ---------------------------------------------------------------------------
+# _names_by_status / _survivor_names
+# ---------------------------------------------------------------------------
+
+
+class TestNamesByStatus:
+    @patch("mutmut_mcp.show_results")
+    def test_groups_every_status(self, mock_results):
+        mock_results.return_value = RESULTS_OUTPUT + "    mymodule.x_slow__mutmut_1: timeout\n"
+        grouped, error = _names_by_status()
+        assert error == ""
+        assert grouped == {
+            "survived": ["mymodule.x_core_logic__mutmut_1", "mymodule.x_logger_setup__mutmut_1"],
+            "no tests": ["mymodule.x_helper__mutmut_2"],
+            "timeout": ["mymodule.x_slow__mutmut_1"],
+        }
+
+    @patch("mutmut_mcp.show_results")
+    def test_error_passthrough(self, mock_results):
+        mock_results.return_value = "Error: boom"
+        assert _names_by_status() == ({}, "Error: boom")
+
+    @patch("mutmut_mcp.show_results")
+    def test_survivor_names_stays_survived_only(self, mock_results):
+        mock_results.return_value = RESULTS_OUTPUT
+        assert _survivor_names() == (
+            ["mymodule.x_core_logic__mutmut_1", "mymodule.x_logger_setup__mutmut_1"],
+            "",
+        )
+
+
+# ---------------------------------------------------------------------------
 # run_mutmut  (mutmut 3.x: `mutmut run [MUTANT_NAMES]...`)
 # ---------------------------------------------------------------------------
 
@@ -254,20 +287,43 @@ class TestShowResults:
 
 class TestShowSurvivors:
     @patch("mutmut_mcp._run_command")
-    def test_lists_only_survived(self, mock_cmd):
+    def test_lists_survivors_and_uncovered_in_labelled_sections(self, mock_cmd):
         mock_cmd.return_value = RESULTS_OUTPUT
         result = show_survivors()
         # Derived from `mutmut results`, never the removed `survivors` command.
         assert mock_cmd.call_args[0][0] == ["mutmut", "results"]
-        assert "mymodule.x_core_logic__mutmut_1" in result
-        assert "mymodule.x_logger_setup__mutmut_1" in result
-        # "no tests" mutants are not survivors.
-        assert "x_helper__mutmut_2" not in result
+        assert result == (
+            "mymodule.x_core_logic__mutmut_1\n"
+            "mymodule.x_logger_setup__mutmut_1\n"
+            "\n"
+            "Not covered by any test (1):\n"
+            "mymodule.x_helper__mutmut_2"
+        )
+
+    @patch("mutmut_mcp._run_command")
+    def test_survivors_only_output_is_unchanged(self, mock_cmd):
+        # Every mutant has a definite, covered result -> plain newline-separated names.
+        mock_cmd.return_value = "    mod.x_a__mutmut_1: survived\n    mod.x_b__mutmut_1: survived\n"
+        assert show_survivors() == "mod.x_a__mutmut_1\nmod.x_b__mutmut_1"
+
+    @patch("mutmut_mcp._run_command")
+    def test_uncovered_without_survivors_is_reported(self, mock_cmd):
+        mock_cmd.return_value = "    mod.x_a__mutmut_1: no tests\n    mod.x_b__mutmut_1: no tests\n"
+        result = show_survivors()
+        assert result != "No surviving mutants found."
+        assert "No surviving mutants found." not in result
+        assert result == "Not covered by any test (2):\nmod.x_a__mutmut_1\nmod.x_b__mutmut_1"
 
     @patch("mutmut_mcp._run_command")
     def test_no_survivors(self, mock_cmd):
-        mock_cmd.return_value = "    mod.x__mutmut_1: no tests\n"
-        assert "No surviving mutants" in show_survivors()
+        # No survivors and nothing uncovered -> the bare message.
+        mock_cmd.return_value = ""
+        assert show_survivors() == "No surviving mutants found."
+
+    @patch("mutmut_mcp._run_command")
+    def test_other_statuses_do_not_count_as_survivors(self, mock_cmd):
+        mock_cmd.return_value = "    mod.x_a__mutmut_1: timeout\n    mod.x_b__mutmut_1: suspicious\n"
+        assert show_survivors() == "No surviving mutants found."
 
     @patch("mutmut_mcp._run_command")
     def test_error_passthrough(self, mock_cmd):
@@ -399,29 +455,65 @@ class TestShowMutant:
 
 class TestPrioritizeSurvivors:
     @patch("mutmut_mcp.show_results")
-    def test_no_survivors(self, mock_results):
+    def test_uncovered_mutants_are_reported_without_survivors(self, mock_results):
         mock_results.return_value = "    mod.x__mutmut_1: no tests\n"
         result = prioritize_survivors()
-        assert result["prioritized"] == []
+        assert result["prioritized"] == [
+            {
+                "mutant_id": "mod.x__mutmut_1",
+                "score": 2,
+                "reason": "No test covers this mutant.",
+                "raw": "mod.x__mutmut_1",
+                "status": "no tests",
+            }
+        ]
+        assert result["message"] != "No surviving mutants found."
 
     @patch("mutmut_mcp.show_results")
     def test_prioritizes_correctly(self, mock_results):
         mock_results.return_value = RESULTS_OUTPUT
         result = prioritize_survivors()
-        # Only the two `survived` mutants are considered.
-        assert len(result["prioritized"]) == 2
-        # Core logic ranks above the logger survivor (log/debug is deprioritized).
-        top = result["prioritized"][0]
-        assert top["mutant_id"] == "mymodule.x_core_logic__mutmut_1"
-        assert top["score"] == 1
+        # Two `survived` mutants plus the uncovered one.
+        assert [(p["mutant_id"], p["score"], p["status"]) for p in result["prioritized"]] == [
+            # Uncovered ranks above every survivor.
+            ("mymodule.x_helper__mutmut_2", 2, "no tests"),
+            # Core logic still ranks above the logger survivor (log/debug is deprioritized).
+            ("mymodule.x_core_logic__mutmut_1", 1, "survived"),
+            ("mymodule.x_logger_setup__mutmut_1", 0, "survived"),
+        ]
         scores = [p["score"] for p in result["prioritized"]]
-        assert scores[0] >= scores[1]
+        assert scores == sorted(scores, reverse=True)
+
+    @patch("mutmut_mcp.show_results")
+    def test_survivors_only_entries_are_unchanged_apart_from_status(self, mock_results):
+        mock_results.return_value = (
+            "    mymodule.x_core_logic__mutmut_1: survived\n    mymodule.x_logger_setup__mutmut_1: survived\n"
+        )
+        result = prioritize_survivors()
+        assert result["prioritized"] == [
+            {
+                "mutant_id": "mymodule.x_core_logic__mutmut_1",
+                "score": 1,
+                "reason": "Potentially material logic, prioritize.",
+                "raw": "mymodule.x_core_logic__mutmut_1",
+                "status": "survived",
+            },
+            {
+                "mutant_id": "mymodule.x_logger_setup__mutmut_1",
+                "score": 0,
+                "reason": "Likely log/debug only, deprioritized.",
+                "raw": "mymodule.x_logger_setup__mutmut_1",
+                "status": "survived",
+            },
+        ]
+        assert result["message"] == "Survivors prioritized by likely materiality."
 
     @patch("mutmut_mcp.show_results")
     def test_empty_output(self, mock_results):
         mock_results.return_value = ""
         result = prioritize_survivors()
         assert result["prioritized"] == []
+        assert result["message"] == "No surviving mutants found."
 
     @patch("mutmut_mcp.show_results")
     def test_error_passthrough(self, mock_results):
