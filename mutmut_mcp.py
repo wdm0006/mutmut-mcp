@@ -3,7 +3,7 @@
 # requires-python = ">=3.10"
 # dependencies = [
 #   "pip",
-#   "fastmcp>=2.14.0,<3.0.0",
+#   "fastmcp>=3.4.5,<4.0.0",
 #   "mutmut"
 # ]
 # ///
