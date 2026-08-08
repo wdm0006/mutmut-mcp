@@ -61,7 +61,7 @@ The following tools are available:
 ### `project_path`
 
 Every tool accepts an optional `project_path`: the directory containing the project's mutmut
-configuration (`[mutmut] paths_to_mutate=` in `setup.cfg` / `pyproject.toml`), its source, its
+configuration (`[mutmut] source_paths=` in `setup.cfg` / `pyproject.toml`), its source, its
 tests, and mutmut's `mutants/` state directory. Mutmut runs with that directory as its working
 directory, and `clean_mutmut_cache` removes state only from inside it.
 

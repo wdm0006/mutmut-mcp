@@ -48,6 +48,25 @@ class TestRunCommand:
         mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="fail\n")
         assert _run_command(["false"]) == "Error: fail\n"
 
+    @patch("mutmut_mcp.subprocess.run")
+    def test_nonzero_exit_with_stdout_and_stderr_is_an_error(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=1, stdout="partial\n", stderr="fail\n")
+        assert _run_command(["mutmut", "results"]) == "partial\nError: fail\n"
+
+    @patch("mutmut_mcp.subprocess.run")
+    def test_success_with_stderr_is_a_warning_not_an_error(self, mock_run):
+        # mutmut 3.7 warns on stderr about deprecated config while still succeeding; the
+        # stdout must survive and the result must not read as a failed call.
+        mock_run.return_value = MagicMock(returncode=0, stdout=RESULTS_OUTPUT, stderr="deprecated config\n")
+        result = _run_command(["mutmut", "results"])
+        assert not result.startswith("Error")
+        assert result == f"{RESULTS_OUTPUT}Warning: deprecated config\n"
+
+    @patch("mutmut_mcp.subprocess.run")
+    def test_success_with_stderr_only_is_not_an_error(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="deprecated config\n")
+        assert _run_command(["mutmut", "results"]) == "Warning: deprecated config\n"
+
     @patch("mutmut_mcp.subprocess.run", side_effect=FileNotFoundError("not found"))
     def test_exception(self, mock_run):
         result = _run_command(["nonexistent_binary"])
@@ -225,6 +244,16 @@ class TestNamesByStatus:
     def test_error_passthrough(self, mock_results):
         mock_results.return_value = "Error: boom"
         assert _names_by_status() == ({}, "Error: boom")
+
+    @patch("mutmut_mcp.show_results")
+    def test_warning_annotated_results_are_still_grouped(self, mock_results):
+        # A successful `mutmut results` that also warned on stderr must still be parsed,
+        # and the warning text must not land in a status the tools act on.
+        mock_results.return_value = RESULTS_OUTPUT + "Warning: some_config is deprecated. Please rename it\n"
+        grouped, error = _names_by_status()
+        assert error == ""
+        assert grouped["survived"] == ["mymodule.x_core_logic__mutmut_1", "mymodule.x_logger_setup__mutmut_1"]
+        assert grouped["no tests"] == ["mymodule.x_helper__mutmut_2"]
 
     @patch("mutmut_mcp.show_results")
     def test_survivor_names_stays_survived_only(self, mock_results):

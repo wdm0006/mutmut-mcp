@@ -28,7 +28,7 @@ def mutmut_project(tmp_path, monkeypatch):
     """A minimal, config-driven mutmut project in a temp working directory."""
     (tmp_path / "foo.py").write_text("def add(a, b):\n    return a + b\n")
     (tmp_path / "test_foo.py").write_text("from foo import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n")
-    (tmp_path / "setup.cfg").write_text("[mutmut]\npaths_to_mutate=foo.py\n")
+    (tmp_path / "setup.cfg").write_text("[mutmut]\nsource_paths=foo.py\n")
     monkeypatch.chdir(tmp_path)
     return tmp_path
 
@@ -78,7 +78,7 @@ def partly_tested_project(tmp_path, monkeypatch):
         "def test_scale():\n"
         "    assert scale(0) == 0\n"
     )
-    (tmp_path / "setup.cfg").write_text("[mutmut]\npaths_to_mutate=foo.py\n")
+    (tmp_path / "setup.cfg").write_text("[mutmut]\nsource_paths=foo.py\n")
     monkeypatch.chdir(tmp_path)
     return tmp_path
 

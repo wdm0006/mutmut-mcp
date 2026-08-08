@@ -39,12 +39,20 @@ STATUS_NO_TESTS = "no tests"
 
 
 def _run_command(command: List[str], cwd: Optional[str] = None) -> str:
-    """Helper function to run a shell command and return output or error."""
+    """Helper function to run a shell command and return its output plus any diagnostics.
+
+    stdout is always preserved: mutmut exits non-zero when it finds survivors, which is a
+    result rather than a failure. stderr is appended when present, but only a command that
+    actually failed gets the `Error:` label — a successful command's stderr (a mutmut
+    deprecation warning, for example) is labelled `Warning:` so callers do not treat it as
+    a failed call.
+    """
     try:
         result = subprocess.run(command, shell=False, capture_output=True, text=True, cwd=cwd)
         if result.stderr:
             separator = "" if not result.stdout or result.stdout.endswith("\n") else "\n"
-            return f"{result.stdout}{separator}Error: {result.stderr}"
+            label = "Error" if result.returncode != 0 else "Warning"
+            return f"{result.stdout}{separator}{label}: {result.stderr}"
         return result.stdout
     except Exception as e:
         return f"Exception occurred: {str(e)}"
@@ -95,7 +103,7 @@ def run_mutmut(
     """
     Run a mutation testing session with `mutmut run`.
 
-    In mutmut 3.x the files to mutate are configured via `[mutmut] paths_to_mutate=` in
+    In mutmut 3.x the files to mutate are configured via `[mutmut] source_paths=` in
     setup.cfg / pyproject.toml, not passed on the command line. `mutmut run` instead accepts
     an optional list of mutant-name filters (e.g. 'mypkg.module.x_func__mutmut_1'); leaving
     `target` empty runs the full suite. If a virtual environment path is provided, mutmut is
