@@ -36,6 +36,8 @@ MUTMUT_LEGACY_CACHE_PATH = ".mutmut-cache"
 # `mutmut results` statuses this server reasons about.
 STATUS_SURVIVED = "survived"
 STATUS_NO_TESTS = "no tests"
+STATUS_NOT_CHECKED = "not checked"
+STATUS_INTERRUPTED = "check was interrupted by user"
 
 
 def _run_command(command: List[str], cwd: Optional[str] = None) -> str:
@@ -163,6 +165,26 @@ def _parse_results(output: str) -> List[tuple]:
     return parsed
 
 
+def _status_counts(results: List[tuple]) -> dict:
+    """Count the statuses in parsed `mutmut results` pairs."""
+    counts: dict = {}
+    for _, status in results:
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+def _result_summary(venv_path: Optional[str] = None, project_path: Optional[str] = None) -> tuple:
+    """Return (names_by_status, status_counts, error) from one results call."""
+    output = show_results(venv_path, project_path)
+    if output.startswith("Error") or output.startswith("Exception"):
+        return {}, {}, output
+    results = _parse_results(output)
+    grouped: dict = {}
+    for name, status in results:
+        grouped.setdefault(status, []).append(name)
+    return grouped, _status_counts(results), ""
+
+
 def _names_by_status(venv_path: Optional[str] = None, project_path: Optional[str] = None) -> tuple:
     """Return (names_by_status, error) from a single `mutmut results` call.
 
@@ -170,13 +192,24 @@ def _names_by_status(venv_path: Optional[str] = None, project_path: Optional[str
     mutant names carrying it, in the order mutmut printed them. `error` is a non-empty string
     when the underlying call failed; in that case the mapping is empty.
     """
-    output = show_results(venv_path, project_path)
-    if output.startswith("Error") or output.startswith("Exception"):
-        return {}, output
-    grouped: dict = {}
-    for name, status in _parse_results(output):
-        grouped.setdefault(status, []).append(name)
-    return grouped, ""
+    grouped, _, error = _result_summary(venv_path, project_path)
+    return grouped, error
+
+
+def _unresolved_note(status_counts: dict) -> str:
+    """Describe incomplete results, or return an empty string when all are resolved."""
+    not_checked = status_counts.get(STATUS_NOT_CHECKED, 0)
+    interrupted = status_counts.get(STATUS_INTERRUPTED, 0)
+    parts = []
+    if not_checked:
+        subject = "mutant is" if not_checked == 1 else "mutants are"
+        parts.append(f"{not_checked} {subject} not checked")
+    if interrupted:
+        subject = "mutant check was" if interrupted == 1 else "mutant checks were"
+        parts.append(f"{interrupted} {subject} interrupted by the user")
+    if not parts:
+        return ""
+    return f"{' and '.join(parts)} — run mutmut again for a complete picture."
 
 
 def _survivor_names(venv_path: Optional[str] = None, project_path: Optional[str] = None) -> tuple:
@@ -185,7 +218,7 @@ def _survivor_names(venv_path: Optional[str] = None, project_path: Optional[str]
     `error` is a non-empty string when the underlying `mutmut results` call failed;
     in that case `survivor_names` is empty.
     """
-    grouped, error = _names_by_status(venv_path, project_path)
+    grouped, _, error = _result_summary(venv_path, project_path)
     return grouped.get(STATUS_SURVIVED, []), error
 
 
@@ -198,7 +231,8 @@ def show_survivors(venv_path: Optional[str] = None, project_path: Optional[str] 
     Survivors (status 'survived') are listed first, one name per line. Mutants that no test
     exercises at all (status 'no tests') follow in a separate labelled section — they are not
     survivors, but they are the strongest signal of a coverage gap, so they are never dropped.
-    'No surviving mutants found.' means every mutant has a definite, covered result.
+    Unchecked or interrupted mutants add an incomplete-results note. The plain
+    'No surviving mutants found.' message means every reported mutant has a definite result.
 
     Args:
         venv_path (Optional[str]): Path to the project's virtual environment. A relative path is
@@ -206,18 +240,24 @@ def show_survivors(venv_path: Optional[str] = None, project_path: Optional[str] 
         project_path (Optional[str]): Directory holding the project's mutmut configuration and state.
             Defaults to the server's working directory.
     """
-    grouped, error = _names_by_status(venv_path, project_path)
+    grouped, status_counts, error = _result_summary(venv_path, project_path)
     if error:
         return error
     survivors = grouped.get(STATUS_SURVIVED, [])
     uncovered = grouped.get(STATUS_NO_TESTS, [])
+    unresolved_note = _unresolved_note(status_counts)
     if not survivors and not uncovered:
-        return "No surviving mutants found."
+        message = "No surviving mutants found."
+        if unresolved_note:
+            message = f"No surviving mutants found, but {unresolved_note}"
+        return message
     sections = []
     if survivors:
         sections.append("\n".join(survivors))
     if uncovered:
         sections.append(f"Not covered by any test ({len(uncovered)}):\n" + "\n".join(uncovered))
+    if unresolved_note:
+        sections.append(f"Incomplete results: {unresolved_note}")
     return "\n\n".join(sections)
 
 
@@ -310,6 +350,8 @@ def prioritize_survivors(venv_path: Optional[str] = None, project_path: Optional
     'survived' for one a test ran but failed to detect. Scores are a rank, not a flag —
     2 = uncovered, 1 = likely-material survivor, 0 = likely log/debug-only survivor — so
     coverage gaps sort above survivors and log/debug names sort last.
+    The response also includes `status_counts` for every status mutmut reported; unchecked
+    or interrupted mutants add an incomplete-results note without entering the ranking.
 
     Args:
         venv_path (Optional[str]): Path to the project's virtual environment. A relative path is
@@ -317,13 +359,17 @@ def prioritize_survivors(venv_path: Optional[str] = None, project_path: Optional
         project_path (Optional[str]): Directory holding the project's mutmut configuration and state.
             Defaults to the server's working directory.
     """
-    grouped, error = _names_by_status(venv_path, project_path)
+    grouped, status_counts, error = _result_summary(venv_path, project_path)
     if error:
-        return {"prioritized": [], "message": error}
+        return {"prioritized": [], "message": error, "status_counts": {}}
     survivors = grouped.get(STATUS_SURVIVED, [])
     uncovered = grouped.get(STATUS_NO_TESTS, [])
     if not survivors and not uncovered:
-        return {"prioritized": [], "message": "No surviving mutants found."}
+        message = "No surviving mutants found."
+        unresolved_note = _unresolved_note(status_counts)
+        if unresolved_note:
+            message = f"No surviving mutants found, but {unresolved_note}"
+        return {"prioritized": [], "message": message, "status_counts": status_counts}
     noise_tokens = {"log", "debug", "print", "logger", "logging"}
     prioritized = []
     for name in uncovered:
@@ -359,7 +405,10 @@ def prioritize_survivors(venv_path: Optional[str] = None, project_path: Optional
         )
     else:
         message = "Survivors prioritized by likely materiality."
-    return {"prioritized": prioritized, "message": message}
+    unresolved_note = _unresolved_note(status_counts)
+    if unresolved_note:
+        message = f"{message} Incomplete results: {unresolved_note}"
+    return {"prioritized": prioritized, "message": message, "status_counts": status_counts}
 
 
 def main():

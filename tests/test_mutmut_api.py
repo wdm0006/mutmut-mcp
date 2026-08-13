@@ -9,6 +9,7 @@ from mutmut_mcp import (
     _parse_results,
     _run_command,
     _run_mutmut_cli,
+    _status_counts,
     _survivor_names,
     clean_mutmut_cache,
     prioritize_survivors,
@@ -355,6 +356,27 @@ class TestShowSurvivors:
         assert show_survivors() == "No surviving mutants found."
 
     @patch("mutmut_mcp._run_command")
+    def test_unchecked_without_survivors_reports_incomplete_run(self, mock_cmd):
+        mock_cmd.return_value = "    mod.x_a__mutmut_1: not checked\n    mod.x_b__mutmut_1: not checked\n"
+        result = show_survivors()
+        assert result.startswith("No surviving mutants found, but")
+        assert "2 mutants are not checked" in result
+        assert "run mutmut again" in result
+
+    @patch("mutmut_mcp._run_command")
+    def test_survivors_with_unresolved_mutants_include_note(self, mock_cmd):
+        mock_cmd.return_value = (
+            "    mod.x_a__mutmut_1: survived\n"
+            "    mod.x_b__mutmut_1: not checked\n"
+            "    mod.x_c__mutmut_1: check was interrupted by user\n"
+        )
+        result = show_survivors()
+        assert result.startswith("mod.x_a__mutmut_1")
+        assert "Incomplete results:" in result
+        assert "1 mutant is not checked" in result
+        assert "1 mutant check was interrupted by the user" in result
+
+    @patch("mutmut_mcp._run_command")
     def test_error_passthrough(self, mock_cmd):
         mock_cmd.return_value = "Error: boom"
         assert show_survivors() == "Error: boom"
@@ -484,6 +506,24 @@ class TestShowMutant:
 
 class TestPrioritizeSurvivors:
     @patch("mutmut_mcp.show_results")
+    def test_unchecked_status_counts_and_message(self, mock_results):
+        mock_results.return_value = (
+            "    mod.x_a__mutmut_1: not checked\n    mod.x_b__mutmut_1: not checked\n    mod.x_c__mutmut_1: timeout\n"
+        )
+        result = prioritize_survivors()
+        assert result["prioritized"] == []
+        assert result["status_counts"] == {"not checked": 2, "timeout": 1}
+        assert "2 mutants are not checked" in result["message"]
+
+    @patch("mutmut_mcp.show_results")
+    def test_unresolved_note_does_not_change_prioritized_entries(self, mock_results):
+        mock_results.return_value = "    mod.x_a__mutmut_1: survived\n    mod.x_b__mutmut_1: not checked\n"
+        result = prioritize_survivors()
+        assert [entry["mutant_id"] for entry in result["prioritized"]] == ["mod.x_a__mutmut_1"]
+        assert result["status_counts"] == {"survived": 1, "not checked": 1}
+        assert "Incomplete results: 1 mutant is not checked" in result["message"]
+
+    @patch("mutmut_mcp.show_results")
     def test_uncovered_mutants_are_reported_without_survivors(self, mock_results):
         mock_results.return_value = "    mod.x__mutmut_1: no tests\n"
         result = prioritize_survivors()
@@ -512,6 +552,7 @@ class TestPrioritizeSurvivors:
         ]
         scores = [p["score"] for p in result["prioritized"]]
         assert scores == sorted(scores, reverse=True)
+        assert result["status_counts"] == {"survived": 2, "no tests": 1}
 
     @patch("mutmut_mcp.show_results")
     def test_survivors_only_entries_are_unchanged_apart_from_status(self, mock_results):
@@ -536,6 +577,7 @@ class TestPrioritizeSurvivors:
             },
         ]
         assert result["message"] == "Survivors prioritized by likely materiality."
+        assert result["status_counts"] == {"survived": 2}
 
     @patch("mutmut_mcp.show_results")
     def test_empty_output(self, mock_results):
@@ -543,6 +585,7 @@ class TestPrioritizeSurvivors:
         result = prioritize_survivors()
         assert result["prioritized"] == []
         assert result["message"] == "No surviving mutants found."
+        assert result["status_counts"] == {}
 
     @patch("mutmut_mcp.show_results")
     def test_error_passthrough(self, mock_results):
@@ -550,3 +593,11 @@ class TestPrioritizeSurvivors:
         result = prioritize_survivors()
         assert result["prioritized"] == []
         assert "boom" in result["message"]
+        assert result["status_counts"] == {}
+
+
+def test_status_counts_counts_every_parsed_status():
+    assert _status_counts([("a", "survived"), ("b", "not checked"), ("c", "not checked")]) == {
+        "survived": 1,
+        "not checked": 2,
+    }
