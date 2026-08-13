@@ -53,6 +53,12 @@ def test_inline_block_requires_fastmcp_3():
     assert specifier.startswith(">=3."), specifier
 
 
+def test_mutmut_is_bounded_to_supported_major():
+    expected = ">=3,<4"
+    assert _dependencies(_inline_metadata())["mutmut"] == expected
+    assert _dependencies(PYPROJECT_SOURCE)["mutmut"] == expected
+
+
 def test_inline_block_and_pyproject_agree_on_requires_python():
     inline = re.search(r'^requires-python\s*=\s*"([^"]+)"', _inline_metadata(), re.MULTILINE)
     packaged = re.search(r'^requires-python\s*=\s*"([^"]+)"', PYPROJECT_SOURCE, re.MULTILINE)

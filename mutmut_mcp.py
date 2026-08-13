@@ -4,7 +4,7 @@
 # dependencies = [
 #   "pip",
 #   "fastmcp>=3.4.5,<4.0.0",
-#   "mutmut"
+#   "mutmut>=3,<4"
 # ]
 # ///
 
