@@ -119,3 +119,37 @@ def test_show_results_against_explicit_project_path(mutmut_project, tmp_path_fac
     result = show_results(project_path=str(mutmut_project))
     assert not result.startswith("Error")
     assert not result.startswith("Exception")
+
+
+def test_partial_rerun_reports_real_unchecked_mutants(tmp_path, monkeypatch):
+    """Editing tests and rerunning one survivor must expose invalidated results."""
+    functions = "\n\n".join(f"def value_{i}(x):\n    return x + {i + 1}" for i in range(12))
+    imports = ", ".join(f"value_{i}" for i in range(12))
+    weak_tests = "\n\n".join(f"def test_value_{i}():\n    assert value_{i}(0) >= 0" for i in range(12))
+    (tmp_path / "sample.py").write_text(f"{functions}\n")
+    test_file = tmp_path / "test_sample.py"
+    test_file.write_text(f"from sample import {imports}\n\n\n{weak_tests}\n")
+    (tmp_path / "setup.cfg").write_text(
+        "[mutmut]\nsource_paths=sample.py\ncache_invalidation_files=test_sample.py\non_dependency_change=rerun\n"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    run_mutmut(options="--max-children 1")
+    first_results = _parse_results(show_results())
+    survivors = [name for name, status in first_results if status == "survived"]
+    assert survivors, first_results
+
+    strong_tests = "\n\n".join(
+        f"def test_value_{i}():\n    assert value_{i}(0) == {i + 1}\n    assert value_{i}(5) == {i + 6}"
+        for i in range(12)
+    )
+    test_file.write_text(f"from sample import {imports}\n\n\n{strong_tests}\n")
+    run_mutmut(target=survivors[0], options="--max-children 1")
+
+    updated_results = _parse_results(show_results())
+    unchecked = [name for name, status in updated_results if status == "not checked"]
+    assert unchecked, updated_results
+    report = show_survivors()
+    assert report != "No surviving mutants found."
+    noun = "mutant is" if len(unchecked) == 1 else "mutants are"
+    assert f"{len(unchecked)} {noun} not checked" in report
