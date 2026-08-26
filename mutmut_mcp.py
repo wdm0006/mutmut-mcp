@@ -22,6 +22,7 @@ Dependencies for standalone execution with uv run:
 import os
 import shutil
 import subprocess
+import threading
 from typing import List, Optional
 
 from fastmcp import FastMCP
@@ -38,6 +39,27 @@ STATUS_SURVIVED = "survived"
 STATUS_NO_TESTS = "no tests"
 STATUS_NOT_CHECKED = "not checked"
 STATUS_INTERRUPTED = "check was interrupted by user"
+
+_project_locks: dict[str, threading.Lock] = {}
+_project_locks_lock = threading.Lock()
+
+
+def _canonical_project_path(project_path: Optional[str]) -> str:
+    """Return one absolute path for all spellings of a project directory."""
+    return os.path.abspath(project_path or ".")
+
+
+def _project_lock(project_path: str) -> threading.Lock:
+    """Return the lock for a canonical project path."""
+    with _project_locks_lock:
+        return _project_locks.setdefault(project_path, threading.Lock())
+
+
+def _busy_error(project_path: str) -> str:
+    return (
+        f"Error: a mutmut operation is already in progress for {project_path}. "
+        "Wait for it to finish before starting another."
+    )
 
 
 def _run_command(command: List[str], cwd: Optional[str] = None) -> str:
@@ -86,8 +108,7 @@ def _run_mutmut_cli(args: list, venv_path: Optional[str] = None, project_path: O
     error = _validate_project_path(project_path)
     if error:
         return error
-    if project_path:
-        project_path = os.path.abspath(project_path)
+    project_path = _canonical_project_path(project_path)
     if venv_path:
         mutmut_path = _get_mutmut_path(_resolve_venv_path(venv_path, project_path))
         if not os.path.exists(mutmut_path):
@@ -111,6 +132,11 @@ def run_mutmut(
     `target` empty runs the full suite. If a virtual environment path is provided, mutmut is
     run from that environment.
 
+    Only one mutating operation may be in flight per project. If another `run_mutmut`,
+    `rerun_mutmut_on_survivor` or `clean_mutmut_cache` call is already running for the same
+    project, this returns `Error: a mutmut operation is already in progress for <project>.`
+    without starting anything — wait for that operation to finish and call again.
+
     Args:
         target (str): Optional space-separated mutant-name filter(s) to run. Empty runs all mutants.
         options (str): Additional `mutmut run` flags (e.g., '--max-children 4'). Defaults to empty.
@@ -127,7 +153,17 @@ def run_mutmut(
         args += target.split()
     if options:
         args += options.split()
-    return _run_mutmut_cli(args, venv_path, project_path)
+    error = _validate_project_path(project_path)
+    if error:
+        return error
+    canonical_project = _canonical_project_path(project_path)
+    lock = _project_lock(canonical_project)
+    if not lock.acquire(blocking=False):
+        return _busy_error(canonical_project)
+    try:
+        return _run_mutmut_cli(args, venv_path, canonical_project)
+    finally:
+        lock.release()
 
 
 @mcp.tool()
@@ -272,6 +308,11 @@ def rerun_mutmut_on_survivor(
     single mutant. When no `mutation_id` is given, this reruns every currently-surviving
     mutant by passing their names to `mutmut run`.
 
+    Only one mutating operation may be in flight per project. If another `run_mutmut`,
+    `rerun_mutmut_on_survivor` or `clean_mutmut_cache` call is already running for the same
+    project, this returns `Error: a mutmut operation is already in progress for <project>.`
+    without starting anything — wait for that operation to finish and call again.
+
     Args:
         mutation_id (Optional[str]): Mutant to rerun. None reruns every current survivor.
         venv_path (Optional[str]): Path to the project's virtual environment. A relative path is
@@ -279,14 +320,24 @@ def rerun_mutmut_on_survivor(
         project_path (Optional[str]): Directory holding the project's mutmut configuration and state.
             Defaults to the server's working directory.
     """
-    if mutation_id:
-        return _run_mutmut_cli(["run", mutation_id], venv_path, project_path)
-    names, error = _survivor_names(venv_path, project_path)
+    error = _validate_project_path(project_path)
     if error:
         return error
-    if not names:
-        return "No surviving mutants found."
-    return _run_mutmut_cli(["run", *names], venv_path, project_path)
+    canonical_project = _canonical_project_path(project_path)
+    lock = _project_lock(canonical_project)
+    if not lock.acquire(blocking=False):
+        return _busy_error(canonical_project)
+    try:
+        if mutation_id:
+            return _run_mutmut_cli(["run", mutation_id], venv_path, canonical_project)
+        names, error = _survivor_names(venv_path, canonical_project)
+        if error:
+            return error
+        if not names:
+            return "No surviving mutants found."
+        return _run_mutmut_cli(["run", *names], venv_path, canonical_project)
+    finally:
+        lock.release()
 
 
 @mcp.tool()
@@ -297,6 +348,11 @@ def clean_mutmut_cache(venv_path: Optional[str] = None, project_path: Optional[s
     mutmut 3.x has no `clean` command and stores state in a `mutants/` directory; this removes
     that directory (and a legacy `.mutmut-cache` file if present). Returns a confirmation message.
 
+    Only one mutating operation may be in flight per project. If another `run_mutmut`,
+    `rerun_mutmut_on_survivor` or `clean_mutmut_cache` call is already running for the same
+    project, this returns `Error: a mutmut operation is already in progress for <project>.`
+    without removing anything — wait for that operation to finish and call again.
+
     Args:
         venv_path (Optional[str]): Unused; accepted for signature symmetry with the other tools.
         project_path (Optional[str]): Directory to clean state in — only state inside this directory
@@ -305,11 +361,14 @@ def clean_mutmut_cache(venv_path: Optional[str] = None, project_path: Optional[s
     error = _validate_project_path(project_path)
     if error:
         return error
-    base = project_path or "."
-    state_dir = os.path.normpath(os.path.join(base, MUTMUT_STATE_DIR))
-    legacy_cache = os.path.normpath(os.path.join(base, MUTMUT_LEGACY_CACHE_PATH))
+    base = _canonical_project_path(project_path)
+    lock = _project_lock(base)
+    if not lock.acquire(blocking=False):
+        return _busy_error(base)
     removed = []
     try:
+        state_dir = os.path.normpath(os.path.join(base, MUTMUT_STATE_DIR))
+        legacy_cache = os.path.normpath(os.path.join(base, MUTMUT_LEGACY_CACHE_PATH))
         if os.path.isdir(state_dir):
             shutil.rmtree(state_dir)
             removed.append(f"{state_dir}/")
@@ -318,6 +377,8 @@ def clean_mutmut_cache(venv_path: Optional[str] = None, project_path: Optional[s
             removed.append(legacy_cache)
     except Exception as e:
         return f"Failed to clear mutmut state: {str(e)}"
+    finally:
+        lock.release()
     if removed:
         return f"Mutmut state cleared successfully ({', '.join(removed)})."
     return "No mutmut state found to clear."

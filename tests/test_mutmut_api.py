@@ -1,12 +1,17 @@
+import asyncio
 import os
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+import mutmut_mcp
 from mutmut_mcp import (
+    _canonical_project_path,
     _get_mutmut_path,
     _names_by_status,
     _parse_results,
+    _project_lock,
     _run_command,
     _run_mutmut_cli,
     _status_counts,
@@ -101,7 +106,7 @@ class TestRunMutmutCli:
     def test_without_venv(self, mock_cmd):
         mock_cmd.return_value = "results"
         result = _run_mutmut_cli(["results"])
-        mock_cmd.assert_called_once_with(["mutmut", "results"], cwd=None)
+        mock_cmd.assert_called_once_with(["mutmut", "results"], cwd=os.path.abspath("."))
         assert result == "results"
 
     @patch("mutmut_mcp.os.path.exists", return_value=True)
@@ -143,6 +148,15 @@ class TestProjectPath:
     def test_cli_runs_in_project_path(self, mock_cmd, tmp_path):
         mock_cmd.return_value = "results"
         _run_mutmut_cli(["results"], project_path=str(tmp_path))
+        assert mock_cmd.call_args.kwargs["cwd"] == str(tmp_path)
+
+    @patch("mutmut_mcp._run_command")
+    def test_cli_canonicalizes_default_project_path(self, mock_cmd, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        mock_cmd.return_value = "results"
+
+        _run_mutmut_cli(["results"])
+
         assert mock_cmd.call_args.kwargs["cwd"] == str(tmp_path)
 
     @patch("mutmut_mcp._run_command")
@@ -299,6 +313,119 @@ class TestRunMutmut:
     def test_run_with_missing_venv(self, mock_exists):
         result = run_mutmut("mod", venv_path="/bad/venv")
         assert "Error" in result
+
+
+class TestMutatingOperationLocks:
+    @pytest.mark.parametrize(
+        "operation",
+        [
+            lambda project: run_mutmut(project_path=project),
+            lambda project: rerun_mutmut_on_survivor("mod.x__mutmut_1", project_path=project),
+            lambda project: clean_mutmut_cache(project_path=project),
+        ],
+        ids=["run", "rerun", "clean"],
+    )
+    def test_busy_project_returns_without_starting_work(self, operation, tmp_path):
+        project = str(tmp_path)
+        # Real state to guard: `clean_mutmut_cache` never shells out, so the "no subprocess"
+        # assertions below are vacuous for it — only surviving state proves it did nothing.
+        state = tmp_path / "mutants"
+        state.mkdir()
+        (state / "meta.json").write_text("{}")
+        acquired = threading.Event()
+        release = threading.Event()
+
+        def hold_project_lock():
+            lock = _project_lock(_canonical_project_path(project))
+            lock.acquire()
+            acquired.set()
+            release.wait()
+            lock.release()
+
+        holder = threading.Thread(target=hold_project_lock)
+        holder.start()
+        assert acquired.wait(timeout=1)
+        try:
+            with (
+                patch("mutmut_mcp._run_mutmut_cli") as mock_cli,
+                patch("mutmut_mcp._run_command") as mock_command,
+            ):
+                result = operation(project)
+        finally:
+            release.set()
+            holder.join(timeout=1)
+
+        assert result == (
+            f"Error: a mutmut operation is already in progress for {project}. "
+            "Wait for it to finish before starting another."
+        )
+        mock_cli.assert_not_called()
+        mock_command.assert_not_called()
+        assert (state / "meta.json").read_text() == "{}"
+
+    def test_different_projects_do_not_block_each_other(self, tmp_path):
+        first = tmp_path / "first"
+        second = tmp_path / "second"
+        first.mkdir()
+        second.mkdir()
+        lock = _project_lock(_canonical_project_path(str(first)))
+        lock.acquire()
+        try:
+            with patch("mutmut_mcp._run_mutmut_cli", return_value="done") as mock_cli:
+                assert run_mutmut(project_path=str(second)) == "done"
+        finally:
+            lock.release()
+
+        mock_cli.assert_called_once_with(["run"], None, str(second))
+
+    @pytest.mark.parametrize("project_spelling", [None, ".", "absolute"])
+    def test_equivalent_project_spellings_share_a_lock(self, project_spelling, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        absolute = str(tmp_path)
+        lock = _project_lock(_canonical_project_path(None))
+        lock.acquire()
+        try:
+            spelling = absolute if project_spelling == "absolute" else project_spelling
+            with patch("mutmut_mcp._run_mutmut_cli") as mock_cli:
+                result = run_mutmut(project_path=spelling)
+        finally:
+            lock.release()
+
+        assert "already in progress" in result
+        mock_cli.assert_not_called()
+
+    @patch("mutmut_mcp._run_command")
+    def test_read_tools_remain_available_while_write_lock_is_held(self, mock_command, tmp_path):
+        mock_command.return_value = RESULTS_OUTPUT
+        lock = _project_lock(_canonical_project_path(str(tmp_path)))
+        lock.acquire()
+        try:
+            assert show_results(project_path=str(tmp_path)) == RESULTS_OUTPUT
+            assert "mymodule.x_core_logic__mutmut_1" in show_survivors(project_path=str(tmp_path))
+            assert show_mutant("mod.x__mutmut_1", project_path=str(tmp_path)) == RESULTS_OUTPUT
+            assert prioritize_survivors(project_path=str(tmp_path))["prioritized"]
+        finally:
+            lock.release()
+
+        assert mock_command.call_count == 4
+
+    # FastMCP trims the `Args:`/`Returns:` sections out of a tool's schema description, so the
+    # busy behaviour only reaches the agent if it is documented in the leading prose.
+    @pytest.mark.parametrize(
+        ("tool_name", "documented"),
+        [
+            ("run_mutmut", True),
+            ("rerun_mutmut_on_survivor", True),
+            ("clean_mutmut_cache", True),
+            ("show_results", False),
+            ("show_survivors", False),
+            ("show_mutant", False),
+            ("prioritize_survivors", False),
+        ],
+    )
+    def test_busy_error_is_documented_in_the_mcp_schema(self, tool_name, documented):
+        description = asyncio.run(mutmut_mcp.mcp.get_tool(tool_name)).description
+        assert ("a mutmut operation is already in progress" in description) is documented
 
 
 # ---------------------------------------------------------------------------
