@@ -187,17 +187,23 @@ def _parse_results(output: str) -> List[tuple]:
 
     mutmut 3.x prints one indented line per mutant: '    <mutant_name>: <status>'
     where status is one of killed / survived / no tests / timeout / suspicious /
-    skipped / segfault.
+    skipped / segfault. Only lines of that exact shape are parsed: the raw line
+    must start with mutmut's indentation and the mutant name must contain no
+    whitespace, so annotated stderr and traceback text mixed into the output
+    cannot be read as a mutant.
     """
     parsed = []
     for line in output.splitlines():
+        if not line[:1].isspace():
+            continue
         stripped = line.strip()
         if ": " not in stripped:
             continue
         name, _, status = stripped.rpartition(": ")
         name, status = name.strip(), status.strip()
-        if name:
-            parsed.append((name, status))
+        if not name or any(char.isspace() for char in name):
+            continue
+        parsed.append((name, status))
     return parsed
 
 
