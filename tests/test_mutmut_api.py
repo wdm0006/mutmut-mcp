@@ -12,6 +12,7 @@ from mutmut_mcp import (
     _names_by_status,
     _parse_results,
     _project_lock,
+    _result_summary,
     _run_command,
     _run_mutmut_cli,
     _status_counts,
@@ -31,6 +32,15 @@ RESULTS_OUTPUT = (
     "    mymodule.x_core_logic__mutmut_1: survived\n"
     "    mymodule.x_logger_setup__mutmut_1: survived\n"
     "    mymodule.x_helper__mutmut_2: no tests\n"
+)
+
+# A multi-line traceback as `_run_command` appends it: only the first line carries the
+# label, so the body lines arrive indented and can contain ": ".
+TRACEBACK_STDERR = (
+    "Error: Traceback (most recent call last):\n"
+    '  File "/tmp/proj/run.py", line 3, in <module>\n'
+    '    raise ValueError("bad: thing")\n'
+    "ValueError: bad: thing\n"
 )
 
 # ---------------------------------------------------------------------------
@@ -237,6 +247,43 @@ class TestParseResults:
     def test_ignores_blank_and_headerless_lines(self):
         assert _parse_results("\n\nGenerating mutants\n") == []
 
+    def test_parses_every_real_mutmut_status_unchanged(self):
+        # A results block in mutmut's own shape, including the two statuses whose text
+        # carries whitespace while the mutant name does not.
+        block = (
+            "    mymodule.x_a__mutmut_1: survived\n"
+            "    mymodule.x_b__mutmut_1: no tests\n"
+            "    mymodule.x_c__mutmut_1: not checked\n"
+            "    mymodule.x_d__mutmut_1: check was interrupted by user\n"
+        )
+        assert _parse_results(block) == [
+            ("mymodule.x_a__mutmut_1", "survived"),
+            ("mymodule.x_b__mutmut_1", "no tests"),
+            ("mymodule.x_c__mutmut_1", "not checked"),
+            ("mymodule.x_d__mutmut_1", "check was interrupted by user"),
+        ]
+
+    def test_ignores_unindented_annotated_stderr(self):
+        # `_run_command` appends stderr to stdout with a label; the label line is not
+        # indented, and its extracted "name" ('Warning') carries no whitespace, so only
+        # the indentation check rejects it.
+        output = RESULTS_OUTPUT + "Warning: some_config is deprecated\n"
+        assert _parse_results(output) == _parse_results(RESULTS_OUTPUT)
+
+    def test_ignores_traceback_lines_whose_name_contains_whitespace(self):
+        # Only the first stderr line gets the label, so a traceback's body arrives
+        # indented; its extracted "name" contains whitespace, which is what rejects it.
+        output = RESULTS_OUTPUT + TRACEBACK_STDERR
+        assert _parse_results(output) == _parse_results(RESULTS_OUTPUT)
+
+    def test_junk_never_reaches_the_parsed_pairs(self):
+        parsed = _parse_results(RESULTS_OUTPUT + "Warning: some_config is deprecated\n" + TRACEBACK_STDERR)
+        assert parsed == [
+            ("mymodule.x_core_logic__mutmut_1", "survived"),
+            ("mymodule.x_logger_setup__mutmut_1", "survived"),
+            ("mymodule.x_helper__mutmut_2", "no tests"),
+        ]
+
 
 # ---------------------------------------------------------------------------
 # _names_by_status / _survivor_names
@@ -269,6 +316,19 @@ class TestNamesByStatus:
         assert error == ""
         assert grouped["survived"] == ["mymodule.x_core_logic__mutmut_1", "mymodule.x_logger_setup__mutmut_1"]
         assert grouped["no tests"] == ["mymodule.x_helper__mutmut_2"]
+
+    @patch("mutmut_mcp.show_results")
+    def test_annotated_stderr_contributes_no_status(self, mock_results):
+        # A successful `mutmut results` whose stderr was appended must summarize exactly
+        # as the clean results block does — no fabricated status, no fabricated count.
+        mock_results.return_value = RESULTS_OUTPUT + "Warning: some_config is deprecated\n" + TRACEBACK_STDERR
+        grouped, counts, error = _result_summary()
+        assert error == ""
+        assert grouped == {
+            "survived": ["mymodule.x_core_logic__mutmut_1", "mymodule.x_logger_setup__mutmut_1"],
+            "no tests": ["mymodule.x_helper__mutmut_2"],
+        }
+        assert counts == {"survived": 2, "no tests": 1}
 
     @patch("mutmut_mcp.show_results")
     def test_survivor_names_stays_survived_only(self, mock_results):
@@ -680,6 +740,17 @@ class TestPrioritizeSurvivors:
         scores = [p["score"] for p in result["prioritized"]]
         assert scores == sorted(scores, reverse=True)
         assert result["status_counts"] == {"survived": 2, "no tests": 1}
+
+    @patch("mutmut_mcp.show_results")
+    def test_annotated_stderr_does_not_fabricate_a_status_count(self, mock_results):
+        mock_results.return_value = RESULTS_OUTPUT + "Warning: some_config is deprecated\n" + TRACEBACK_STDERR
+        result = prioritize_survivors()
+        assert result["status_counts"] == {"survived": 2, "no tests": 1}
+        assert [p["mutant_id"] for p in result["prioritized"]] == [
+            "mymodule.x_helper__mutmut_2",
+            "mymodule.x_core_logic__mutmut_1",
+            "mymodule.x_logger_setup__mutmut_1",
+        ]
 
     @patch("mutmut_mcp.show_results")
     def test_survivors_only_entries_are_unchanged_apart_from_status(self, mock_results):
