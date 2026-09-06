@@ -54,12 +54,15 @@ from fastmcp.client.transports import StdioTransport
 
 transport = StdioTransport(command=".venv/bin/python", args=["mutmut_mcp.py"], cwd=".")
 async with Client(transport) as client:
-    tools = await client.list_tools()          # expect the 7 tools
-    await client.call_tool("run_mutmut", {
-        "options": "--max-children 1",         # no target = full run
-        "project_path": "<fixture dir>",
-        "venv_path": ".venv",                  # repo venv holds mutmut + pytest
-    })
+    tools = await client.list_tools()  # expect the 7 tools
+    await client.call_tool(
+        "run_mutmut",
+        {
+            "options": "--max-children 1",  # no target = full run
+            "project_path": "<fixture dir>",
+            "venv_path": ".venv",  # repo venv holds mutmut + pytest
+        },
+    )
     print(await client.call_tool("show_results", {"project_path": "<fixture dir>", "venv_path": ".venv"}))
 ```
 
