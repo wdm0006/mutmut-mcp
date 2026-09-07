@@ -37,6 +37,11 @@ mutmut-mcp = "mutmut_mcp:main"
 "Homepage" = "https://github.com/wdm0006/mutmut-mcp"
 "Bug Tracker" = "https://github.com/wdm0006/mutmut-mcp/issues"
 
+[tool.mypy]
+python_version = "3.10"
+check_untyped_defs = true
+exclude = ['mutants', '\.venv']
+
 [tool.ruff]
 line-length = 120
 
@@ -56,6 +61,17 @@ testpaths = ["tests"]
 # not here, so mutant runs measure test strength rather than the coverage gate.
 addopts = "--timeout=60"
 
+[tool.coverage.run]
+source = ["mutmut_mcp"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    # The stdio entry-point guard is exercised by launching the server, not by
+    # the suite; main() itself is tested with a mocked mcp.run.
+    'if __name__ == "__main__":',
+]
+
 [tool.mutmut]
 # mutmut 3.7.0 form. tests_dir is deprecated (mutmut warns: "add the path to
 # pytest_add_cli_args_test_selection instead"), so test selection is passed
@@ -63,3 +79,7 @@ addopts = "--timeout=60"
 # it, tests/, and this config into its scratch mutants/ tree on every run.
 source_paths = ["mutmut_mcp.py"]
 pytest_add_cli_args_test_selection = ["tests"]
+# tests/test_mutation_budget.py loads scripts/mutation_budget.py from the repo
+# root relative to the test file; the scratch tree does not copy arbitrary
+# subdirectories, so scripts/ must be named here for test collection to work.
+also_copy = ["scripts"]
