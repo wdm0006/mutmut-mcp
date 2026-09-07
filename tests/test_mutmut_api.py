@@ -356,6 +356,66 @@ class TestNamesByStatus:
         )
 
 
+# A stdout block from a *successful* `mutmut results` whose first line begins with
+# "Error" (content echoed before mutmut's own results block). The leading line carries
+# no indentation and no "name: status" pair, so the parser ignores it — but under the
+# old startswith("Error") classification the whole call was reported as a failure and
+# every result in the block was dropped.
+ERROR_PREFIXED_BUT_SUCCESSFUL = (
+    "Error-rate summary: 1 of 3 mutants survived (informational banner)\n"
+    "    mymodule.x_core_logic__mutmut_1: survived\n"
+    "    mymodule.x_helper__mutmut_2: no tests\n"
+)
+
+
+# ---------------------------------------------------------------------------
+# error classification (explicit status, never output sniffing)
+# ---------------------------------------------------------------------------
+
+
+class TestErrorPrefixIsNotAFailure:
+    """Failure classification comes from the exit-code status, not the output text."""
+
+    @patch("mutmut_mcp._run_command")
+    def test_error_prefixed_stdout_is_parsed_as_results(self, mock_cmd):
+        mock_cmd.return_value = _CommandOutcome(ERROR_PREFIXED_BUT_SUCCESSFUL, failed=False)
+        grouped, counts, error = _result_summary()
+        assert error == ""
+        assert grouped == {
+            "survived": ["mymodule.x_core_logic__mutmut_1"],
+            "no tests": ["mymodule.x_helper__mutmut_2"],
+        }
+        assert counts == {"survived": 1, "no tests": 1}
+
+    @patch("mutmut_mcp._run_command")
+    def test_error_prefixed_stdout_reaches_show_survivors_as_content(self, mock_cmd):
+        mock_cmd.return_value = _CommandOutcome(ERROR_PREFIXED_BUT_SUCCESSFUL, failed=False)
+        result = show_survivors()
+        assert "mymodule.x_core_logic__mutmut_1" in result
+        assert "Not covered by any test (1):" in result
+
+    @patch("mutmut_mcp._run_command")
+    def test_error_prefixed_stdout_is_not_the_error_message_in_prioritize(self, mock_cmd):
+        mock_cmd.return_value = _CommandOutcome(ERROR_PREFIXED_BUT_SUCCESSFUL, failed=False)
+        result = prioritize_survivors()
+        assert result["message"] != ERROR_PREFIXED_BUT_SUCCESSFUL
+        assert result["status_counts"] == {"survived": 1, "no tests": 1}
+        assert [entry["mutant_id"] for entry in result["prioritized"]] == [
+            "mymodule.x_helper__mutmut_2",
+            "mymodule.x_core_logic__mutmut_1",
+        ]
+
+    @patch("mutmut_mcp._run_command")
+    def test_failed_call_still_reports_error(self, mock_cmd):
+        # Control: a genuinely failed call (non-zero exit, stderr labelled by
+        # _run_command) must still surface as an error with no results.
+        mock_cmd.return_value = _CommandOutcome("Error: boom\n", failed=True)
+        grouped, counts, error = _result_summary()
+        assert error == "Error: boom\n"
+        assert grouped == {}
+        assert counts == {}
+
+
 # ---------------------------------------------------------------------------
 # run_mutmut  (mutmut 3.x: `mutmut run [MUTANT_NAMES]...`)
 # ---------------------------------------------------------------------------
