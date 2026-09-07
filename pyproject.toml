@@ -20,8 +20,13 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "ruff",
+    # Pinned to match the pre-commit ruff/ruff-format hooks (v0.16.6) so lint
+    # results are identical locally, in CI, and in pre-commit.
+    "ruff==0.16.6",
     "pytest",
+    "pytest-cov",
+    "pytest-timeout",
+    "mypy",
     "pre-commit",
 ]
 
@@ -41,3 +46,20 @@ ignore = ["E501", "C901"]
 
 [tool.ruff.format]
 quote-style = "double"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# 60s per-test guard: several mutants of a subprocess wrapper can plausibly
+# hang a test worker. Mutant runs inherit this too — mutmut copies the config
+# into its scratch tree — which is exactly where the guard matters most.
+# The coverage floor deliberately lives in the CI/Makefile pytest invocation,
+# not here, so mutant runs measure test strength rather than the coverage gate.
+addopts = "--timeout=60"
+
+[tool.mutmut]
+# mutmut 3.7.0 form. tests_dir is deprecated (mutmut warns: "add the path to
+# pytest_add_cli_args_test_selection instead"), so test selection is passed
+# explicitly. The server module is the whole mutation surface; mutmut copies
+# it, tests/, and this config into its scratch mutants/ tree on every run.
+source_paths = ["mutmut_mcp.py"]
+pytest_add_cli_args_test_selection = ["tests"]

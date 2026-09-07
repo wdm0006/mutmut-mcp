@@ -38,6 +38,8 @@ pip-delete-this-directory.txt
 
 # Unit test / coverage reports
 htmlcov/
+# mutmut 3.x scratch tree — generated (and regenerated) by every `mutmut run`
+mutants/
 .tox/
 .nox/
 .coverage
