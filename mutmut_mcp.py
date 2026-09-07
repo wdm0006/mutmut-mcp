@@ -254,17 +254,6 @@ def _result_summary(venv_path: Optional[str] = None, project_path: Optional[str]
     return grouped, _status_counts(results), ""
 
 
-def _names_by_status(venv_path: Optional[str] = None, project_path: Optional[str] = None) -> tuple:
-    """Return (names_by_status, error) from a single `mutmut results` call.
-
-    `names_by_status` maps each status mutmut reported ('survived', 'no tests', ...) to the
-    mutant names carrying it, in the order mutmut printed them. `error` is a non-empty string
-    when the underlying call failed; in that case the mapping is empty.
-    """
-    grouped, _, error = _result_summary(venv_path, project_path)
-    return grouped, error
-
-
 def _unresolved_note(status_counts: dict) -> str:
     """Describe incomplete results, or return an empty string when all are resolved."""
     not_checked = status_counts.get(STATUS_NOT_CHECKED, 0)

@@ -10,7 +10,6 @@ from mutmut_mcp import (
     _canonical_project_path,
     _CommandOutcome,
     _get_mutmut_path,
-    _names_by_status,
     _parse_results,
     _project_lock,
     _result_summary,
@@ -297,28 +296,29 @@ class TestParseResults:
 
 
 # ---------------------------------------------------------------------------
-# _names_by_status / _survivor_names
+# _result_summary / _survivor_names
 # ---------------------------------------------------------------------------
 
 
-class TestNamesByStatus:
+class TestResultSummary:
     @patch("mutmut_mcp._run_mutmut_cli")
     def test_groups_every_status(self, mock_cli):
         mock_cli.return_value = _CommandOutcome(
             RESULTS_OUTPUT + "    mymodule.x_slow__mutmut_1: timeout\n", failed=False
         )
-        grouped, error = _names_by_status()
+        grouped, counts, error = _result_summary()
         assert error == ""
         assert grouped == {
             "survived": ["mymodule.x_core_logic__mutmut_1", "mymodule.x_logger_setup__mutmut_1"],
             "no tests": ["mymodule.x_helper__mutmut_2"],
             "timeout": ["mymodule.x_slow__mutmut_1"],
         }
+        assert counts == {"survived": 2, "no tests": 1, "timeout": 1}
 
     @patch("mutmut_mcp._run_mutmut_cli")
     def test_error_passthrough(self, mock_cli):
         mock_cli.return_value = _CommandOutcome("Error: boom", failed=True)
-        assert _names_by_status() == ({}, "Error: boom")
+        assert _result_summary() == ({}, {}, "Error: boom")
 
     @patch("mutmut_mcp._run_mutmut_cli")
     def test_warning_annotated_results_are_still_grouped(self, mock_cli):
@@ -327,7 +327,7 @@ class TestNamesByStatus:
         mock_cli.return_value = _CommandOutcome(
             RESULTS_OUTPUT + "Warning: some_config is deprecated. Please rename it\n", failed=False
         )
-        grouped, error = _names_by_status()
+        grouped, _, error = _result_summary()
         assert error == ""
         assert grouped["survived"] == ["mymodule.x_core_logic__mutmut_1", "mymodule.x_logger_setup__mutmut_1"]
         assert grouped["no tests"] == ["mymodule.x_helper__mutmut_2"]
