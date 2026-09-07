@@ -23,7 +23,7 @@ import os
 import shutil
 import subprocess
 import threading
-from typing import List, Optional
+from typing import List, NamedTuple, Optional
 
 from fastmcp import FastMCP
 
@@ -44,6 +44,18 @@ _project_locks: dict[str, threading.Lock] = {}
 _project_locks_lock = threading.Lock()
 
 
+class _CommandOutcome(NamedTuple):
+    """One command invocation's display text plus its explicit failure status.
+
+    `failed` comes from the process exit code (or a local validation failure), never
+    from the output text: stdout may legitimately begin with 'Error' and still be a
+    successful call's content.
+    """
+
+    output: str
+    failed: bool
+
+
 def _canonical_project_path(project_path: Optional[str]) -> str:
     """Return one absolute path for all spellings of a project directory."""
     return os.path.abspath(project_path or ".")
@@ -62,24 +74,27 @@ def _busy_error(project_path: str) -> str:
     )
 
 
-def _run_command(command: List[str], cwd: Optional[str] = None) -> str:
+def _run_command(command: List[str], cwd: Optional[str] = None) -> _CommandOutcome:
     """Helper function to run a shell command and return its output plus any diagnostics.
 
     stdout is always preserved: mutmut exits non-zero when it finds survivors, which is a
     result rather than a failure. stderr is appended when present, but only a command that
     actually failed gets the `Error:` label — a successful command's stderr (a mutmut
     deprecation warning, for example) is labelled `Warning:` so callers do not treat it as
-    a failed call.
+    a failed call. `failed` carries the exit code (or an exception) as explicit status so
+    callers never have to sniff the text.
     """
     try:
         result = subprocess.run(command, shell=False, capture_output=True, text=True, cwd=cwd)
         if result.stderr:
             separator = "" if not result.stdout or result.stdout.endswith("\n") else "\n"
             label = "Error" if result.returncode != 0 else "Warning"
-            return f"{result.stdout}{separator}{label}: {result.stderr}"
-        return result.stdout
+            output = f"{result.stdout}{separator}{label}: {result.stderr}"
+        else:
+            output = result.stdout
+        return _CommandOutcome(output, failed=result.returncode != 0)
     except Exception as e:
-        return f"Exception occurred: {str(e)}"
+        return _CommandOutcome(f"Exception occurred: {str(e)}", failed=True)
 
 
 def _get_mutmut_path(venv_path: str) -> str:
@@ -103,16 +118,23 @@ def _resolve_venv_path(venv_path: str, project_path: Optional[str]) -> str:
     return venv_path
 
 
-def _run_mutmut_cli(args: list, venv_path: Optional[str] = None, project_path: Optional[str] = None) -> str:
-    """Run mutmut CLI with given arguments, using venv if provided, from `project_path` if given."""
+def _run_mutmut_cli(args: list, venv_path: Optional[str] = None, project_path: Optional[str] = None) -> _CommandOutcome:
+    """Run mutmut CLI with given arguments, using venv if provided, from `project_path` if given.
+
+    Returns the display output plus the explicit failure status: a non-zero exit, an
+    exception, or a local validation error — never a judgement based on the text.
+    """
     error = _validate_project_path(project_path)
     if error:
-        return error
+        return _CommandOutcome(error, failed=True)
     project_path = _canonical_project_path(project_path)
     if venv_path:
         mutmut_path = _get_mutmut_path(_resolve_venv_path(venv_path, project_path))
         if not os.path.exists(mutmut_path):
-            return f"Error: mutmut not found in the specified venv at {mutmut_path}. Please ensure mutmut is installed in the venv."
+            return _CommandOutcome(
+                f"Error: mutmut not found in the specified venv at {mutmut_path}. Please ensure mutmut is installed in the venv.",
+                failed=True,
+            )
         command = [mutmut_path] + args
     else:
         command = ["mutmut"] + args
@@ -161,7 +183,7 @@ def run_mutmut(
     if not lock.acquire(blocking=False):
         return _busy_error(canonical_project)
     try:
-        return _run_mutmut_cli(args, venv_path, canonical_project)
+        return _run_mutmut_cli(args, venv_path, canonical_project).output
     finally:
         lock.release()
 
@@ -179,7 +201,7 @@ def show_results(venv_path: Optional[str] = None, project_path: Optional[str] = 
 
     Returns the plain text output.
     """
-    return _run_mutmut_cli(["results"], venv_path, project_path)
+    return _run_mutmut_cli(["results"], venv_path, project_path).output
 
 
 def _parse_results(output: str) -> List[tuple]:
@@ -215,27 +237,21 @@ def _status_counts(results: List[tuple]) -> dict:
     return counts
 
 
-def _result_summary(venv_path: Optional[str] = None, project_path: Optional[str] = None) -> tuple:
-    """Return (names_by_status, status_counts, error) from one results call."""
-    output = show_results(venv_path, project_path)
-    if output.startswith("Error") or output.startswith("Exception"):
-        return {}, {}, output
-    results = _parse_results(output)
+def _result_summary(venv_path: Optional[str] = None, project_path: Optional[str] = None) -> tuple[dict, dict, str]:
+    """Return (names_by_status, status_counts, error) from one results call.
+
+    `error` is a non-empty string only when the underlying call failed by its explicit
+    status — a non-zero exit, an exception, or a local validation error — never because
+    of how the output text begins.
+    """
+    outcome = _run_mutmut_cli(["results"], venv_path, project_path)
+    if outcome.failed:
+        return {}, {}, outcome.output
+    results = _parse_results(outcome.output)
     grouped: dict = {}
     for name, status in results:
         grouped.setdefault(status, []).append(name)
     return grouped, _status_counts(results), ""
-
-
-def _names_by_status(venv_path: Optional[str] = None, project_path: Optional[str] = None) -> tuple:
-    """Return (names_by_status, error) from a single `mutmut results` call.
-
-    `names_by_status` maps each status mutmut reported ('survived', 'no tests', ...) to the
-    mutant names carrying it, in the order mutmut printed them. `error` is a non-empty string
-    when the underlying call failed; in that case the mapping is empty.
-    """
-    grouped, _, error = _result_summary(venv_path, project_path)
-    return grouped, error
 
 
 def _unresolved_note(status_counts: dict) -> str:
@@ -335,13 +351,13 @@ def rerun_mutmut_on_survivor(
         return _busy_error(canonical_project)
     try:
         if mutation_id:
-            return _run_mutmut_cli(["run", mutation_id], venv_path, canonical_project)
+            return _run_mutmut_cli(["run", mutation_id], venv_path, canonical_project).output
         names, error = _survivor_names(venv_path, canonical_project)
         if error:
             return error
         if not names:
             return "No surviving mutants found."
-        return _run_mutmut_cli(["run", *names], venv_path, canonical_project)
+        return _run_mutmut_cli(["run", *names], venv_path, canonical_project).output
     finally:
         lock.release()
 
@@ -405,7 +421,7 @@ def show_mutant(mutation_id: str, venv_path: Optional[str] = None, project_path:
     """
     if not mutation_id:
         return "Error: mutation_id is required."
-    return _run_mutmut_cli(["show", mutation_id], venv_path, project_path)
+    return _run_mutmut_cli(["show", mutation_id], venv_path, project_path).output
 
 
 @mcp.tool()

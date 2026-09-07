@@ -8,8 +8,8 @@ import pytest
 import mutmut_mcp
 from mutmut_mcp import (
     _canonical_project_path,
+    _CommandOutcome,
     _get_mutmut_path,
-    _names_by_status,
     _parse_results,
     _project_lock,
     _result_summary,
@@ -52,41 +52,49 @@ class TestRunCommand:
     @patch("mutmut_mcp.subprocess.run")
     def test_success(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stdout="ok\n", stderr="")
-        assert _run_command(["echo", "ok"]) == "ok\n"
+        outcome = _run_command(["echo", "ok"])
+        assert outcome == _CommandOutcome("ok\n", failed=False)
 
     @patch("mutmut_mcp.subprocess.run")
     def test_nonzero_exit_with_stdout(self, mock_run):
+        # mutmut exits non-zero when survivors are found; that is a result, not a failure
+        # of the call — but the exit code is still carried as explicit status for callers.
         mock_run.return_value = MagicMock(returncode=1, stdout="survived: 2\n", stderr="")
-        assert _run_command(["mutmut", "run"]) == "survived: 2\n"
+        outcome = _run_command(["mutmut", "run"])
+        assert outcome == _CommandOutcome("survived: 2\n", failed=True)
 
     @patch("mutmut_mcp.subprocess.run")
     def test_nonzero_exit_with_stderr_only(self, mock_run):
         mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="fail\n")
-        assert _run_command(["false"]) == "Error: fail\n"
+        outcome = _run_command(["false"])
+        assert outcome == _CommandOutcome("Error: fail\n", failed=True)
 
     @patch("mutmut_mcp.subprocess.run")
     def test_nonzero_exit_with_stdout_and_stderr_is_an_error(self, mock_run):
         mock_run.return_value = MagicMock(returncode=1, stdout="partial\n", stderr="fail\n")
-        assert _run_command(["mutmut", "results"]) == "partial\nError: fail\n"
+        outcome = _run_command(["mutmut", "results"])
+        assert outcome == _CommandOutcome("partial\nError: fail\n", failed=True)
 
     @patch("mutmut_mcp.subprocess.run")
     def test_success_with_stderr_is_a_warning_not_an_error(self, mock_run):
         # mutmut 3.7 warns on stderr about deprecated config while still succeeding; the
         # stdout must survive and the result must not read as a failed call.
         mock_run.return_value = MagicMock(returncode=0, stdout=RESULTS_OUTPUT, stderr="deprecated config\n")
-        result = _run_command(["mutmut", "results"])
-        assert not result.startswith("Error")
-        assert result == f"{RESULTS_OUTPUT}Warning: deprecated config\n"
+        outcome = _run_command(["mutmut", "results"])
+        assert not outcome.output.startswith("Error")
+        assert outcome == _CommandOutcome(f"{RESULTS_OUTPUT}Warning: deprecated config\n", failed=False)
 
     @patch("mutmut_mcp.subprocess.run")
     def test_success_with_stderr_only_is_not_an_error(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="deprecated config\n")
-        assert _run_command(["mutmut", "results"]) == "Warning: deprecated config\n"
+        outcome = _run_command(["mutmut", "results"])
+        assert outcome == _CommandOutcome("Warning: deprecated config\n", failed=False)
 
     @patch("mutmut_mcp.subprocess.run", side_effect=FileNotFoundError("not found"))
     def test_exception(self, mock_run):
-        result = _run_command(["nonexistent_binary"])
-        assert "Exception" in result
+        outcome = _run_command(["nonexistent_binary"])
+        assert "Exception" in outcome.output
+        assert outcome.failed
 
 
 # ---------------------------------------------------------------------------
@@ -114,15 +122,15 @@ class TestGetMutmutPath:
 class TestRunMutmutCli:
     @patch("mutmut_mcp._run_command")
     def test_without_venv(self, mock_cmd):
-        mock_cmd.return_value = "results"
-        result = _run_mutmut_cli(["results"])
+        mock_cmd.return_value = _CommandOutcome("results", failed=False)
+        outcome = _run_mutmut_cli(["results"])
         mock_cmd.assert_called_once_with(["mutmut", "results"], cwd=os.path.abspath("."))
-        assert result == "results"
+        assert outcome == _CommandOutcome("results", failed=False)
 
     @patch("mutmut_mcp.os.path.exists", return_value=True)
     @patch("mutmut_mcp._run_command")
     def test_with_venv(self, mock_cmd, mock_exists):
-        mock_cmd.return_value = "results"
+        mock_cmd.return_value = _CommandOutcome("results", failed=False)
         _run_mutmut_cli(["results"], venv_path="/my/venv")
         # Should use venv mutmut binary
         call_args = mock_cmd.call_args[0][0]
@@ -131,9 +139,10 @@ class TestRunMutmutCli:
 
     @patch("mutmut_mcp.os.path.exists", return_value=False)
     def test_with_missing_venv(self, mock_exists):
-        result = _run_mutmut_cli(["results"], venv_path="/missing/venv")
-        assert "Error" in result
-        assert "not found" in result
+        outcome = _run_mutmut_cli(["results"], venv_path="/missing/venv")
+        assert "Error" in outcome.output
+        assert "not found" in outcome.output
+        assert outcome.failed
 
 
 # ---------------------------------------------------------------------------
@@ -156,14 +165,14 @@ class TestProjectPath:
 
     @patch("mutmut_mcp._run_command")
     def test_cli_runs_in_project_path(self, mock_cmd, tmp_path):
-        mock_cmd.return_value = "results"
+        mock_cmd.return_value = _CommandOutcome("results", failed=False)
         _run_mutmut_cli(["results"], project_path=str(tmp_path))
         assert mock_cmd.call_args.kwargs["cwd"] == str(tmp_path)
 
     @patch("mutmut_mcp._run_command")
     def test_cli_canonicalizes_default_project_path(self, mock_cmd, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        mock_cmd.return_value = "results"
+        mock_cmd.return_value = _CommandOutcome("results", failed=False)
 
         _run_mutmut_cli(["results"])
 
@@ -175,7 +184,7 @@ class TestProjectPath:
         bin_dir.mkdir(parents=True)
         binary = bin_dir / ("mutmut.exe" if os.name == "nt" else "mutmut")
         binary.write_text("")
-        mock_cmd.return_value = "results"
+        mock_cmd.return_value = _CommandOutcome("results", failed=False)
 
         _run_mutmut_cli(["results"], venv_path=".venv", project_path=str(tmp_path))
 
@@ -194,20 +203,21 @@ class TestProjectPath:
 
         result = _run_mutmut_cli(["results"], venv_path=".venv", project_path="project")
 
-        assert result.strip() == str(project)
+        assert result.output.strip() == str(project)
 
     @patch("mutmut_mcp._run_command")
     @patch("mutmut_mcp.os.path.exists", return_value=True)
     def test_absolute_venv_not_rebased_on_project_path(self, mock_exists, mock_cmd, tmp_path):
-        mock_cmd.return_value = "results"
+        mock_cmd.return_value = _CommandOutcome("results", failed=False)
         _run_mutmut_cli(["results"], venv_path="/abs/venv", project_path=str(tmp_path))
         assert mock_cmd.call_args[0][0][0].startswith("/abs/venv")
 
     @patch("mutmut_mcp._run_command")
     def test_missing_project_path_errors_without_running(self, mock_cmd, tmp_path):
-        result = _run_mutmut_cli(["results"], project_path=str(tmp_path / "nope"))
-        assert "Error" in result
-        assert "not an existing directory" in result
+        outcome = _run_mutmut_cli(["results"], project_path=str(tmp_path / "nope"))
+        assert "Error" in outcome.output
+        assert "not an existing directory" in outcome.output
+        assert outcome.failed
         mock_cmd.assert_not_called()
 
     @patch("mutmut_mcp._run_command")
@@ -220,7 +230,7 @@ class TestProjectPath:
 
     @patch("mutmut_mcp._run_command")
     def test_tools_thread_project_path(self, mock_cmd, tmp_path):
-        mock_cmd.return_value = RESULTS_OUTPUT
+        mock_cmd.return_value = _CommandOutcome(RESULTS_OUTPUT, failed=False)
         project = str(tmp_path)
         run_mutmut(project_path=project)
         show_results(project_path=project)
@@ -286,42 +296,49 @@ class TestParseResults:
 
 
 # ---------------------------------------------------------------------------
-# _names_by_status / _survivor_names
+# _result_summary / _survivor_names
 # ---------------------------------------------------------------------------
 
 
-class TestNamesByStatus:
-    @patch("mutmut_mcp.show_results")
-    def test_groups_every_status(self, mock_results):
-        mock_results.return_value = RESULTS_OUTPUT + "    mymodule.x_slow__mutmut_1: timeout\n"
-        grouped, error = _names_by_status()
+class TestResultSummary:
+    @patch("mutmut_mcp._run_mutmut_cli")
+    def test_groups_every_status(self, mock_cli):
+        mock_cli.return_value = _CommandOutcome(
+            RESULTS_OUTPUT + "    mymodule.x_slow__mutmut_1: timeout\n", failed=False
+        )
+        grouped, counts, error = _result_summary()
         assert error == ""
         assert grouped == {
             "survived": ["mymodule.x_core_logic__mutmut_1", "mymodule.x_logger_setup__mutmut_1"],
             "no tests": ["mymodule.x_helper__mutmut_2"],
             "timeout": ["mymodule.x_slow__mutmut_1"],
         }
+        assert counts == {"survived": 2, "no tests": 1, "timeout": 1}
 
-    @patch("mutmut_mcp.show_results")
-    def test_error_passthrough(self, mock_results):
-        mock_results.return_value = "Error: boom"
-        assert _names_by_status() == ({}, "Error: boom")
+    @patch("mutmut_mcp._run_mutmut_cli")
+    def test_error_passthrough(self, mock_cli):
+        mock_cli.return_value = _CommandOutcome("Error: boom", failed=True)
+        assert _result_summary() == ({}, {}, "Error: boom")
 
-    @patch("mutmut_mcp.show_results")
-    def test_warning_annotated_results_are_still_grouped(self, mock_results):
+    @patch("mutmut_mcp._run_mutmut_cli")
+    def test_warning_annotated_results_are_still_grouped(self, mock_cli):
         # A successful `mutmut results` that also warned on stderr must still be parsed,
         # and the warning text must not land in a status the tools act on.
-        mock_results.return_value = RESULTS_OUTPUT + "Warning: some_config is deprecated. Please rename it\n"
-        grouped, error = _names_by_status()
+        mock_cli.return_value = _CommandOutcome(
+            RESULTS_OUTPUT + "Warning: some_config is deprecated. Please rename it\n", failed=False
+        )
+        grouped, _, error = _result_summary()
         assert error == ""
         assert grouped["survived"] == ["mymodule.x_core_logic__mutmut_1", "mymodule.x_logger_setup__mutmut_1"]
         assert grouped["no tests"] == ["mymodule.x_helper__mutmut_2"]
 
-    @patch("mutmut_mcp.show_results")
-    def test_annotated_stderr_contributes_no_status(self, mock_results):
+    @patch("mutmut_mcp._run_mutmut_cli")
+    def test_annotated_stderr_contributes_no_status(self, mock_cli):
         # A successful `mutmut results` whose stderr was appended must summarize exactly
         # as the clean results block does — no fabricated status, no fabricated count.
-        mock_results.return_value = RESULTS_OUTPUT + "Warning: some_config is deprecated\n" + TRACEBACK_STDERR
+        mock_cli.return_value = _CommandOutcome(
+            RESULTS_OUTPUT + "Warning: some_config is deprecated\n" + TRACEBACK_STDERR, failed=False
+        )
         grouped, counts, error = _result_summary()
         assert error == ""
         assert grouped == {
@@ -330,13 +347,73 @@ class TestNamesByStatus:
         }
         assert counts == {"survived": 2, "no tests": 1}
 
-    @patch("mutmut_mcp.show_results")
-    def test_survivor_names_stays_survived_only(self, mock_results):
-        mock_results.return_value = RESULTS_OUTPUT
+    @patch("mutmut_mcp._run_mutmut_cli")
+    def test_survivor_names_stays_survived_only(self, mock_cli):
+        mock_cli.return_value = _CommandOutcome(RESULTS_OUTPUT, failed=False)
         assert _survivor_names() == (
             ["mymodule.x_core_logic__mutmut_1", "mymodule.x_logger_setup__mutmut_1"],
             "",
         )
+
+
+# A stdout block from a *successful* `mutmut results` whose first line begins with
+# "Error" (content echoed before mutmut's own results block). The leading line carries
+# no indentation and no "name: status" pair, so the parser ignores it — but under the
+# old startswith("Error") classification the whole call was reported as a failure and
+# every result in the block was dropped.
+ERROR_PREFIXED_BUT_SUCCESSFUL = (
+    "Error-rate summary: 1 of 3 mutants survived (informational banner)\n"
+    "    mymodule.x_core_logic__mutmut_1: survived\n"
+    "    mymodule.x_helper__mutmut_2: no tests\n"
+)
+
+
+# ---------------------------------------------------------------------------
+# error classification (explicit status, never output sniffing)
+# ---------------------------------------------------------------------------
+
+
+class TestErrorPrefixIsNotAFailure:
+    """Failure classification comes from the exit-code status, not the output text."""
+
+    @patch("mutmut_mcp._run_command")
+    def test_error_prefixed_stdout_is_parsed_as_results(self, mock_cmd):
+        mock_cmd.return_value = _CommandOutcome(ERROR_PREFIXED_BUT_SUCCESSFUL, failed=False)
+        grouped, counts, error = _result_summary()
+        assert error == ""
+        assert grouped == {
+            "survived": ["mymodule.x_core_logic__mutmut_1"],
+            "no tests": ["mymodule.x_helper__mutmut_2"],
+        }
+        assert counts == {"survived": 1, "no tests": 1}
+
+    @patch("mutmut_mcp._run_command")
+    def test_error_prefixed_stdout_reaches_show_survivors_as_content(self, mock_cmd):
+        mock_cmd.return_value = _CommandOutcome(ERROR_PREFIXED_BUT_SUCCESSFUL, failed=False)
+        result = show_survivors()
+        assert "mymodule.x_core_logic__mutmut_1" in result
+        assert "Not covered by any test (1):" in result
+
+    @patch("mutmut_mcp._run_command")
+    def test_error_prefixed_stdout_is_not_the_error_message_in_prioritize(self, mock_cmd):
+        mock_cmd.return_value = _CommandOutcome(ERROR_PREFIXED_BUT_SUCCESSFUL, failed=False)
+        result = prioritize_survivors()
+        assert result["message"] != ERROR_PREFIXED_BUT_SUCCESSFUL
+        assert result["status_counts"] == {"survived": 1, "no tests": 1}
+        assert [entry["mutant_id"] for entry in result["prioritized"]] == [
+            "mymodule.x_helper__mutmut_2",
+            "mymodule.x_core_logic__mutmut_1",
+        ]
+
+    @patch("mutmut_mcp._run_command")
+    def test_failed_call_still_reports_error(self, mock_cmd):
+        # Control: a genuinely failed call (non-zero exit, stderr labelled by
+        # _run_command) must still surface as an error with no results.
+        mock_cmd.return_value = _CommandOutcome("Error: boom\n", failed=True)
+        grouped, counts, error = _result_summary()
+        assert error == "Error: boom\n"
+        assert grouped == {}
+        assert counts == {}
 
 
 # ---------------------------------------------------------------------------
@@ -347,20 +424,20 @@ class TestNamesByStatus:
 class TestRunMutmut:
     @patch("mutmut_mcp._run_command")
     def test_run_all(self, mock_cmd):
-        mock_cmd.return_value = "7/7"
+        mock_cmd.return_value = _CommandOutcome("7/7", failed=False)
         run_mutmut()
         assert mock_cmd.call_args[0][0] == ["mutmut", "run"]
 
     @patch("mutmut_mcp._run_command")
     def test_run_with_mutant_filter(self, mock_cmd):
-        mock_cmd.return_value = "1/1"
+        mock_cmd.return_value = _CommandOutcome("1/1", failed=False)
         run_mutmut("mymodule.x_add__mutmut_1")
         call_args = mock_cmd.call_args[0][0]
         assert call_args == ["mutmut", "run", "mymodule.x_add__mutmut_1"]
 
     @patch("mutmut_mcp._run_command")
     def test_run_with_options(self, mock_cmd):
-        mock_cmd.return_value = "done"
+        mock_cmd.return_value = _CommandOutcome("done", failed=False)
         run_mutmut(options="--max-children 4")
         call_args = mock_cmd.call_args[0][0]
         assert "--max-children" in call_args
@@ -431,7 +508,7 @@ class TestMutatingOperationLocks:
         lock = _project_lock(_canonical_project_path(str(first)))
         lock.acquire()
         try:
-            with patch("mutmut_mcp._run_mutmut_cli", return_value="done") as mock_cli:
+            with patch("mutmut_mcp._run_mutmut_cli", return_value=_CommandOutcome("done", failed=False)) as mock_cli:
                 assert run_mutmut(project_path=str(second)) == "done"
         finally:
             lock.release()
@@ -456,7 +533,7 @@ class TestMutatingOperationLocks:
 
     @patch("mutmut_mcp._run_command")
     def test_read_tools_remain_available_while_write_lock_is_held(self, mock_command, tmp_path):
-        mock_command.return_value = RESULTS_OUTPUT
+        mock_command.return_value = _CommandOutcome(RESULTS_OUTPUT, failed=False)
         lock = _project_lock(_canonical_project_path(str(tmp_path)))
         lock.acquire()
         try:
@@ -496,7 +573,7 @@ class TestMutatingOperationLocks:
 class TestShowResults:
     @patch("mutmut_mcp._run_command")
     def test_show_results_uses_results_command(self, mock_cmd):
-        mock_cmd.return_value = "    mod.x__mutmut_1: survived\n"
+        mock_cmd.return_value = _CommandOutcome("    mod.x__mutmut_1: survived\n", failed=False)
         result = show_results()
         assert mock_cmd.call_args[0][0] == ["mutmut", "results"]
         assert "survived" in result
@@ -505,7 +582,7 @@ class TestShowResults:
 class TestShowSurvivors:
     @patch("mutmut_mcp._run_command")
     def test_lists_survivors_and_uncovered_in_labelled_sections(self, mock_cmd):
-        mock_cmd.return_value = RESULTS_OUTPUT
+        mock_cmd.return_value = _CommandOutcome(RESULTS_OUTPUT, failed=False)
         result = show_survivors()
         # Derived from `mutmut results`, never the removed `survivors` command.
         assert mock_cmd.call_args[0][0] == ["mutmut", "results"]
@@ -520,12 +597,16 @@ class TestShowSurvivors:
     @patch("mutmut_mcp._run_command")
     def test_survivors_only_output_is_unchanged(self, mock_cmd):
         # Every mutant has a definite, covered result -> plain newline-separated names.
-        mock_cmd.return_value = "    mod.x_a__mutmut_1: survived\n    mod.x_b__mutmut_1: survived\n"
+        mock_cmd.return_value = _CommandOutcome(
+            "    mod.x_a__mutmut_1: survived\n    mod.x_b__mutmut_1: survived\n", failed=False
+        )
         assert show_survivors() == "mod.x_a__mutmut_1\nmod.x_b__mutmut_1"
 
     @patch("mutmut_mcp._run_command")
     def test_uncovered_without_survivors_is_reported(self, mock_cmd):
-        mock_cmd.return_value = "    mod.x_a__mutmut_1: no tests\n    mod.x_b__mutmut_1: no tests\n"
+        mock_cmd.return_value = _CommandOutcome(
+            "    mod.x_a__mutmut_1: no tests\n    mod.x_b__mutmut_1: no tests\n", failed=False
+        )
         result = show_survivors()
         assert result != "No surviving mutants found."
         assert "No surviving mutants found." not in result
@@ -534,17 +615,21 @@ class TestShowSurvivors:
     @patch("mutmut_mcp._run_command")
     def test_no_survivors(self, mock_cmd):
         # No survivors and nothing uncovered -> the bare message.
-        mock_cmd.return_value = ""
+        mock_cmd.return_value = _CommandOutcome("", failed=False)
         assert show_survivors() == "No surviving mutants found."
 
     @patch("mutmut_mcp._run_command")
     def test_other_statuses_do_not_count_as_survivors(self, mock_cmd):
-        mock_cmd.return_value = "    mod.x_a__mutmut_1: timeout\n    mod.x_b__mutmut_1: suspicious\n"
+        mock_cmd.return_value = _CommandOutcome(
+            "    mod.x_a__mutmut_1: timeout\n    mod.x_b__mutmut_1: suspicious\n", failed=False
+        )
         assert show_survivors() == "No surviving mutants found."
 
     @patch("mutmut_mcp._run_command")
     def test_unchecked_without_survivors_reports_incomplete_run(self, mock_cmd):
-        mock_cmd.return_value = "    mod.x_a__mutmut_1: not checked\n    mod.x_b__mutmut_1: not checked\n"
+        mock_cmd.return_value = _CommandOutcome(
+            "    mod.x_a__mutmut_1: not checked\n    mod.x_b__mutmut_1: not checked\n", failed=False
+        )
         result = show_survivors()
         assert result.startswith("No surviving mutants found, but")
         assert "2 mutants are not checked" in result
@@ -552,10 +637,11 @@ class TestShowSurvivors:
 
     @patch("mutmut_mcp._run_command")
     def test_survivors_with_unresolved_mutants_include_note(self, mock_cmd):
-        mock_cmd.return_value = (
+        mock_cmd.return_value = _CommandOutcome(
             "    mod.x_a__mutmut_1: survived\n"
             "    mod.x_b__mutmut_1: not checked\n"
-            "    mod.x_c__mutmut_1: check was interrupted by user\n"
+            "    mod.x_c__mutmut_1: check was interrupted by user\n",
+            failed=False,
         )
         result = show_survivors()
         assert result.startswith("mod.x_a__mutmut_1")
@@ -565,7 +651,7 @@ class TestShowSurvivors:
 
     @patch("mutmut_mcp._run_command")
     def test_error_passthrough(self, mock_cmd):
-        mock_cmd.return_value = "Error: boom"
+        mock_cmd.return_value = _CommandOutcome("Error: boom", failed=True)
         assert show_survivors() == "Error: boom"
 
 
@@ -577,7 +663,7 @@ class TestShowSurvivors:
 class TestRerunMutmut:
     @patch("mutmut_mcp._run_command")
     def test_rerun_specific(self, mock_cmd):
-        mock_cmd.return_value = "done"
+        mock_cmd.return_value = _CommandOutcome("done", failed=False)
         rerun_mutmut_on_survivor(mutation_id="mymodule.x_add__mutmut_1")
         call_args = mock_cmd.call_args[0][0]
         assert call_args == ["mutmut", "run", "mymodule.x_add__mutmut_1"]
@@ -588,7 +674,7 @@ class TestRerunMutmut:
     @patch("mutmut_mcp._run_command")
     def test_rerun_all_survivors(self, mock_cmd):
         # First call: `mutmut results` (to find survivors); second: `mutmut run <names>`.
-        mock_cmd.side_effect = [RESULTS_OUTPUT, "done"]
+        mock_cmd.side_effect = [_CommandOutcome(RESULTS_OUTPUT, failed=False), _CommandOutcome("done", failed=False)]
         rerun_mutmut_on_survivor()
         run_call = mock_cmd.call_args_list[-1][0][0]
         assert run_call[:2] == ["mutmut", "run"]
@@ -598,7 +684,7 @@ class TestRerunMutmut:
 
     @patch("mutmut_mcp._run_command")
     def test_rerun_all_no_survivors(self, mock_cmd):
-        mock_cmd.return_value = ""
+        mock_cmd.return_value = _CommandOutcome("", failed=False)
         result = rerun_mutmut_on_survivor()
         assert "No surviving mutants" in result
         # Only the `results` probe ran; no `run` was issued.
@@ -676,7 +762,7 @@ class TestCleanMutmutCache:
 class TestShowMutant:
     @patch("mutmut_mcp._run_command")
     def test_show_mutant(self, mock_cmd):
-        mock_cmd.return_value = "--- a/mod.py\n+++ b/mod.py\n-  x = 1\n+  x = 2"
+        mock_cmd.return_value = _CommandOutcome("--- a/mod.py\n+++ b/mod.py\n-  x = 1\n+  x = 2", failed=False)
         result = show_mutant("mymodule.x_add__mutmut_1")
         assert mock_cmd.call_args[0][0] == ["mutmut", "show", "mymodule.x_add__mutmut_1"]
         assert "mod.py" in result
@@ -692,27 +778,30 @@ class TestShowMutant:
 
 
 class TestPrioritizeSurvivors:
-    @patch("mutmut_mcp.show_results")
-    def test_unchecked_status_counts_and_message(self, mock_results):
-        mock_results.return_value = (
-            "    mod.x_a__mutmut_1: not checked\n    mod.x_b__mutmut_1: not checked\n    mod.x_c__mutmut_1: timeout\n"
+    @patch("mutmut_mcp._run_mutmut_cli")
+    def test_unchecked_status_counts_and_message(self, mock_cli):
+        mock_cli.return_value = _CommandOutcome(
+            "    mod.x_a__mutmut_1: not checked\n    mod.x_b__mutmut_1: not checked\n    mod.x_c__mutmut_1: timeout\n",
+            failed=False,
         )
         result = prioritize_survivors()
         assert result["prioritized"] == []
         assert result["status_counts"] == {"not checked": 2, "timeout": 1}
         assert "2 mutants are not checked" in result["message"]
 
-    @patch("mutmut_mcp.show_results")
-    def test_unresolved_note_does_not_change_prioritized_entries(self, mock_results):
-        mock_results.return_value = "    mod.x_a__mutmut_1: survived\n    mod.x_b__mutmut_1: not checked\n"
+    @patch("mutmut_mcp._run_mutmut_cli")
+    def test_unresolved_note_does_not_change_prioritized_entries(self, mock_cli):
+        mock_cli.return_value = _CommandOutcome(
+            "    mod.x_a__mutmut_1: survived\n    mod.x_b__mutmut_1: not checked\n", failed=False
+        )
         result = prioritize_survivors()
         assert [entry["mutant_id"] for entry in result["prioritized"]] == ["mod.x_a__mutmut_1"]
         assert result["status_counts"] == {"survived": 1, "not checked": 1}
         assert "Incomplete results: 1 mutant is not checked" in result["message"]
 
-    @patch("mutmut_mcp.show_results")
-    def test_uncovered_mutants_are_reported_without_survivors(self, mock_results):
-        mock_results.return_value = "    mod.x__mutmut_1: no tests\n"
+    @patch("mutmut_mcp._run_mutmut_cli")
+    def test_uncovered_mutants_are_reported_without_survivors(self, mock_cli):
+        mock_cli.return_value = _CommandOutcome("    mod.x__mutmut_1: no tests\n", failed=False)
         result = prioritize_survivors()
         assert result["prioritized"] == [
             {
@@ -725,9 +814,9 @@ class TestPrioritizeSurvivors:
         ]
         assert result["message"] != "No surviving mutants found."
 
-    @patch("mutmut_mcp.show_results")
-    def test_prioritizes_correctly(self, mock_results):
-        mock_results.return_value = RESULTS_OUTPUT
+    @patch("mutmut_mcp._run_mutmut_cli")
+    def test_prioritizes_correctly(self, mock_cli):
+        mock_cli.return_value = _CommandOutcome(RESULTS_OUTPUT, failed=False)
         result = prioritize_survivors()
         # Two `survived` mutants plus the uncovered one.
         assert [(p["mutant_id"], p["score"], p["status"]) for p in result["prioritized"]] == [
@@ -741,9 +830,11 @@ class TestPrioritizeSurvivors:
         assert scores == sorted(scores, reverse=True)
         assert result["status_counts"] == {"survived": 2, "no tests": 1}
 
-    @patch("mutmut_mcp.show_results")
-    def test_annotated_stderr_does_not_fabricate_a_status_count(self, mock_results):
-        mock_results.return_value = RESULTS_OUTPUT + "Warning: some_config is deprecated\n" + TRACEBACK_STDERR
+    @patch("mutmut_mcp._run_mutmut_cli")
+    def test_annotated_stderr_does_not_fabricate_a_status_count(self, mock_cli):
+        mock_cli.return_value = _CommandOutcome(
+            RESULTS_OUTPUT + "Warning: some_config is deprecated\n" + TRACEBACK_STDERR, failed=False
+        )
         result = prioritize_survivors()
         assert result["status_counts"] == {"survived": 2, "no tests": 1}
         assert [p["mutant_id"] for p in result["prioritized"]] == [
@@ -752,10 +843,11 @@ class TestPrioritizeSurvivors:
             "mymodule.x_logger_setup__mutmut_1",
         ]
 
-    @patch("mutmut_mcp.show_results")
-    def test_survivors_only_entries_are_unchanged_apart_from_status(self, mock_results):
-        mock_results.return_value = (
-            "    mymodule.x_core_logic__mutmut_1: survived\n    mymodule.x_logger_setup__mutmut_1: survived\n"
+    @patch("mutmut_mcp._run_mutmut_cli")
+    def test_survivors_only_entries_are_unchanged_apart_from_status(self, mock_cli):
+        mock_cli.return_value = _CommandOutcome(
+            "    mymodule.x_core_logic__mutmut_1: survived\n    mymodule.x_logger_setup__mutmut_1: survived\n",
+            failed=False,
         )
         result = prioritize_survivors()
         assert result["prioritized"] == [
@@ -777,17 +869,17 @@ class TestPrioritizeSurvivors:
         assert result["message"] == "Survivors prioritized by likely materiality."
         assert result["status_counts"] == {"survived": 2}
 
-    @patch("mutmut_mcp.show_results")
-    def test_empty_output(self, mock_results):
-        mock_results.return_value = ""
+    @patch("mutmut_mcp._run_mutmut_cli")
+    def test_empty_output(self, mock_cli):
+        mock_cli.return_value = _CommandOutcome("", failed=False)
         result = prioritize_survivors()
         assert result["prioritized"] == []
         assert result["message"] == "No surviving mutants found."
         assert result["status_counts"] == {}
 
-    @patch("mutmut_mcp.show_results")
-    def test_error_passthrough(self, mock_results):
-        mock_results.return_value = "Error: boom"
+    @patch("mutmut_mcp._run_mutmut_cli")
+    def test_error_passthrough(self, mock_cli):
+        mock_cli.return_value = _CommandOutcome("Error: boom", failed=True)
         result = prioritize_survivors()
         assert result["prioritized"] == []
         assert "boom" in result["message"]
