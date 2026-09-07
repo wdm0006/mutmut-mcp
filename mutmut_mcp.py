@@ -78,6 +78,12 @@ def _project_lock(project_path: str) -> threading.Lock:
 
 
 def _busy_error(project_path: str) -> str:
+    """Return the serialized error for a concurrent mutmut call on the same project.
+
+    All tools take this branch instead of racing: mutmut 3.x keeps per-project
+    state in `mutants/`, so two simultaneous runs against one project_path
+    would corrupt each other's scratch tree.
+    """
     return (
         f"Error: a mutmut operation is already in progress for {project_path}. "
         "Wait for it to finish before starting another."
