@@ -34,6 +34,7 @@ def _dependencies(toml_text: str) -> dict:
     found = {}
     for requirement in re.findall(r"[\"']([^\"']+)[\"']", array.group(1)):
         parsed = REQUIREMENT.match(requirement.strip())
+        assert parsed, f"unparseable requirement: {requirement!r}"
         found[parsed.group("name").lower()] = parsed.group("specifier").replace(" ", "")
     return found
 

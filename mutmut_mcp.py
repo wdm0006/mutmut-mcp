@@ -23,7 +23,7 @@ import os
 import shutil
 import subprocess
 import threading
-from typing import List, NamedTuple, Optional
+from typing import NamedTuple, Optional, TypedDict
 
 from fastmcp import FastMCP
 
@@ -56,6 +56,16 @@ class _CommandOutcome(NamedTuple):
     failed: bool
 
 
+class _RankedMutant(TypedDict):
+    """One entry of the ranking `prioritize_survivors` returns."""
+
+    mutant_id: str
+    score: int
+    reason: str
+    raw: str
+    status: str
+
+
 def _canonical_project_path(project_path: Optional[str]) -> str:
     """Return one absolute path for all spellings of a project directory."""
     return os.path.abspath(project_path or ".")
@@ -68,13 +78,19 @@ def _project_lock(project_path: str) -> threading.Lock:
 
 
 def _busy_error(project_path: str) -> str:
+    """Return the serialized error for a concurrent mutmut call on the same project.
+
+    All tools take this branch instead of racing: mutmut 3.x keeps per-project
+    state in `mutants/`, so two simultaneous runs against one project_path
+    would corrupt each other's scratch tree.
+    """
     return (
         f"Error: a mutmut operation is already in progress for {project_path}. "
         "Wait for it to finish before starting another."
     )
 
 
-def _run_command(command: List[str], cwd: Optional[str] = None) -> _CommandOutcome:
+def _run_command(command: list[str], cwd: Optional[str] = None) -> _CommandOutcome:
     """Helper function to run a shell command and return its output plus any diagnostics.
 
     stdout is always preserved: mutmut exits non-zero when it finds survivors, which is a
@@ -118,7 +134,9 @@ def _resolve_venv_path(venv_path: str, project_path: Optional[str]) -> str:
     return venv_path
 
 
-def _run_mutmut_cli(args: list, venv_path: Optional[str] = None, project_path: Optional[str] = None) -> _CommandOutcome:
+def _run_mutmut_cli(
+    args: list[str], venv_path: Optional[str] = None, project_path: Optional[str] = None
+) -> _CommandOutcome:
     """Run mutmut CLI with given arguments, using venv if provided, from `project_path` if given.
 
     Returns the display output plus the explicit failure status: a non-zero exit, an
@@ -204,7 +222,7 @@ def show_results(venv_path: Optional[str] = None, project_path: Optional[str] = 
     return _run_mutmut_cli(["results"], venv_path, project_path).output
 
 
-def _parse_results(output: str) -> List[tuple]:
+def _parse_results(output: str) -> list[tuple[str, str]]:
     """Parse `mutmut results` output into (mutant_name, status) pairs.
 
     mutmut 3.x prints one indented line per mutant: '    <mutant_name>: <status>'
@@ -214,7 +232,7 @@ def _parse_results(output: str) -> List[tuple]:
     whitespace, so annotated stderr and traceback text mixed into the output
     cannot be read as a mutant.
     """
-    parsed = []
+    parsed: list[tuple[str, str]] = []
     for line in output.splitlines():
         if not line[:1].isspace():
             continue
@@ -229,15 +247,17 @@ def _parse_results(output: str) -> List[tuple]:
     return parsed
 
 
-def _status_counts(results: List[tuple]) -> dict:
+def _status_counts(results: list[tuple[str, str]]) -> dict[str, int]:
     """Count the statuses in parsed `mutmut results` pairs."""
-    counts: dict = {}
+    counts: dict[str, int] = {}
     for _, status in results:
         counts[status] = counts.get(status, 0) + 1
     return counts
 
 
-def _result_summary(venv_path: Optional[str] = None, project_path: Optional[str] = None) -> tuple[dict, dict, str]:
+def _result_summary(
+    venv_path: Optional[str] = None, project_path: Optional[str] = None
+) -> tuple[dict[str, list[str]], dict[str, int], str]:
     """Return (names_by_status, status_counts, error) from one results call.
 
     `error` is a non-empty string only when the underlying call failed by its explicit
@@ -248,17 +268,17 @@ def _result_summary(venv_path: Optional[str] = None, project_path: Optional[str]
     if outcome.failed:
         return {}, {}, outcome.output
     results = _parse_results(outcome.output)
-    grouped: dict = {}
+    grouped: dict[str, list[str]] = {}
     for name, status in results:
         grouped.setdefault(status, []).append(name)
     return grouped, _status_counts(results), ""
 
 
-def _unresolved_note(status_counts: dict) -> str:
+def _unresolved_note(status_counts: dict[str, int]) -> str:
     """Describe incomplete results, or return an empty string when all are resolved."""
     not_checked = status_counts.get(STATUS_NOT_CHECKED, 0)
     interrupted = status_counts.get(STATUS_INTERRUPTED, 0)
-    parts = []
+    parts: list[str] = []
     if not_checked:
         subject = "mutant is" if not_checked == 1 else "mutants are"
         parts.append(f"{not_checked} {subject} not checked")
@@ -270,7 +290,7 @@ def _unresolved_note(status_counts: dict) -> str:
     return f"{' and '.join(parts)} — run mutmut again for a complete picture."
 
 
-def _survivor_names(venv_path: Optional[str] = None, project_path: Optional[str] = None) -> tuple:
+def _survivor_names(venv_path: Optional[str] = None, project_path: Optional[str] = None) -> tuple[list[str], str]:
     """Return (survivor_names, error). Survivors are mutants with status 'survived'.
 
     `error` is a non-empty string when the underlying `mutmut results` call failed;
@@ -424,6 +444,9 @@ def show_mutant(mutation_id: str, venv_path: Optional[str] = None, project_path:
     return _run_mutmut_cli(["show", mutation_id], venv_path, project_path).output
 
 
+# The return annotation stays a bare `dict`: fastmcp derives the tool's output
+# schema from it, and a TypedDict here would change the declared MCP schema.
+# The entry shape is pinned by _RankedMutant instead.
 @mcp.tool()
 def prioritize_survivors(venv_path: Optional[str] = None, project_path: Optional[str] = None) -> dict:
     """
@@ -454,7 +477,7 @@ def prioritize_survivors(venv_path: Optional[str] = None, project_path: Optional
             message = f"No surviving mutants found, but {unresolved_note}"
         return {"prioritized": [], "message": message, "status_counts": status_counts}
     noise_tokens = {"log", "debug", "print", "logger", "logging"}
-    prioritized = []
+    prioritized: list[_RankedMutant] = []
     for name in uncovered:
         prioritized.append(
             {

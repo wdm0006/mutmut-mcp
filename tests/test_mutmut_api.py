@@ -561,7 +561,10 @@ class TestMutatingOperationLocks:
         ],
     )
     def test_busy_error_is_documented_in_the_mcp_schema(self, tool_name, documented):
-        description = asyncio.run(mutmut_mcp.mcp.get_tool(tool_name)).description
+        tool = asyncio.run(mutmut_mcp.mcp.get_tool(tool_name))
+        assert tool is not None, f"tool {tool_name} missing from the registry"
+        description = tool.description
+        assert isinstance(description, str)
         assert ("a mutmut operation is already in progress" in description) is documented
 
 
