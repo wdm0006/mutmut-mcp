@@ -515,6 +515,38 @@ class TestMutatingOperationLocks:
 
         mock_cli.assert_called_once_with(["run"], None, str(second))
 
+    def test_symlinked_project_spellings_share_a_lock(self, tmp_path):
+        project = tmp_path / "project"
+        project.mkdir()
+        alias = tmp_path / "project-alias"
+        alias.symlink_to(project, target_is_directory=True)
+
+        canonical_project = _canonical_project_path(str(project))
+        canonical_alias = _canonical_project_path(str(alias))
+
+        assert canonical_alias == canonical_project
+        assert _project_lock(canonical_alias) is _project_lock(canonical_project)
+
+    def test_symlinked_project_contends_without_starting_mutmut(self, tmp_path):
+        project = tmp_path / "project"
+        project.mkdir()
+        alias = tmp_path / "project-alias"
+        alias.symlink_to(project, target_is_directory=True)
+        canonical_project = _canonical_project_path(str(project))
+        lock = _project_lock(canonical_project)
+        lock.acquire()
+        try:
+            with patch("mutmut_mcp._run_mutmut_cli") as mock_cli:
+                result = run_mutmut(project_path=str(alias))
+        finally:
+            lock.release()
+
+        assert result == (
+            f"Error: a mutmut operation is already in progress for {canonical_project}. "
+            "Wait for it to finish before starting another."
+        )
+        mock_cli.assert_not_called()
+
     @pytest.mark.parametrize("project_spelling", [None, ".", "absolute"])
     def test_equivalent_project_spellings_share_a_lock(self, project_spelling, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
