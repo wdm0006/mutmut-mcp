@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from mutmut_mcp import _collapse_progress, _run_command, rerun_mutmut_on_survivor, run_mutmut
+from mutmut_mcp import _collapse_progress, _decode, _run_command, _run_mutmut_cli, rerun_mutmut_on_survivor, run_mutmut
 
 FIXTURE = Path(__file__).parent / "fixtures" / "mutmut_run_output.bin"
 RAW = FIXTURE.read_bytes()
@@ -99,3 +99,35 @@ def test_real_subprocess_keeps_cr_frames_until_collapsed():
     code = r"import sys; sys.stdout.write('\rf1   \rf2   \nline\r\n'); sys.stdout.flush()"
     out = _run_command([sys.executable, "-c", code], collapse_progress=True).output
     assert out == "f2\nline\n"
+
+
+def test_collapse_strips_only_space_padding():
+    assert _collapse_progress("\rfX  \r\tframeX \t\n") == "\tframeX \t\n"
+    assert _collapse_progress("\rpadX   ") == "padX"
+
+
+def test_collapse_keeps_only_trailing_cr_distinct_from_frames():
+    assert _collapse_progress("x\r \r") == ""
+    assert _collapse_progress("a  \r") == "a  "
+    assert _collapse_progress("one\r\rtwo \r") == "two"
+
+
+def test_decode_replaces_invalid_utf8_and_passes_str_through():
+    assert _decode(b"ok \xff\xfe end") == "ok �� end"
+    assert _decode("already text") == "already text"
+    assert _decode("café".encode()) == "café"
+
+
+@pytest.mark.parametrize(
+    "args, collapse",
+    [(["run"], True), (["run", "pkg.x_f__mutmut_1"], True), (["results"], False), (["show", "run"], False)],
+)
+@patch("mutmut_mcp._run_command")
+def test_cli_collapses_only_for_run(mock_cmd, args, collapse):
+    _run_mutmut_cli(args)
+    assert mock_cmd.call_args.kwargs.get("collapse_progress", False) is collapse
+
+
+def test_collapse_strips_only_carriage_returns_from_line_end():
+    assert _collapse_progress("fooX\r") == "fooX"
+    assert _collapse_progress("XX\r\r") == "XX"

@@ -94,24 +94,21 @@ def _collapse_progress(text: str) -> str:
     """Reduce carriage-return progress frames to what a terminal would have shown.
 
     mutmut redraws its spinner with `\\r` and no newline, so one captured line holds every
-    frame. Per `\\n`-delimited line, keep the text after the last `\\r`, falling back to the
-    previous segment when that is empty (a line ending in a bare `\\r` is CRLF content, not a
-    frame), and strip the padding mutmut appends to frames.
+    frame. Per `\\n`-delimited line, drop trailing `\\r` (CRLF content, not a frame), keep the
+    text after the last remaining `\\r`, and strip the padding mutmut appends to frames.
     """
     lines = []
     for line in text.split("\n"):
-        if "\r" not in line:
-            lines.append(line)
-            continue
-        segments = line.split("\r")
-        frame = segments[-1] or (segments[-2] if len(segments) > 1 else "")
-        lines.append(frame.rstrip(" ") if "\r" in line.rstrip("\r") else frame)
+        body = line.rstrip("\r")
+        if "\r" in body:
+            body = body.rsplit("\r", 1)[1].rstrip(" ")
+        lines.append(body)
     return "\n".join(lines)
 
 
 def _decode(stream: "bytes | str") -> str:
     """Decode a captured stream without letting text mode rewrite `\\r` into `\\n`."""
-    return stream.decode("utf-8", errors="replace") if isinstance(stream, bytes) else stream
+    return stream.decode(errors="replace") if isinstance(stream, bytes) else stream
 
 
 def _run_command(command: list[str], cwd: Optional[str] = None, collapse_progress: bool = False) -> _CommandOutcome:

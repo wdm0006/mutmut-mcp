@@ -6,13 +6,13 @@ survivor must be killed by a named test; raising the budget in CI requires a
 waiver recorded here with the mutant, the mutated code, and why no test can
 (or should) distinguish it.
 
-Campaign at time of writing: 210 mutants, 204 detected (97.1%), 6 waived.
+Campaign at time of writing: 267 mutants, 261 detected (97.8%), 6 waived.
 
-## `mutmut_mcp.x__run_command__mutmut_3` — `shell=False` → `shell=None`
+## `mutmut_mcp.x__run_command__mutmut_4` — `shell=False` → `shell=None`
 
 ```diff
--        result = subprocess.run(command, shell=False, capture_output=True, text=True, cwd=cwd)
-+        result = subprocess.run(command, shell=None, capture_output=True, text=True, cwd=cwd)
+-        result = subprocess.run(command, shell=False, capture_output=True, cwd=cwd)
++        result = subprocess.run(command, shell=None, capture_output=True, cwd=cwd)
 ```
 
 Equivalent: `None` is subprocess's own default for `shell`, so both spellings
