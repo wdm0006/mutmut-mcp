@@ -90,7 +90,31 @@ def _busy_error(project_path: str) -> str:
     )
 
 
-def _run_command(command: list[str], cwd: Optional[str] = None) -> _CommandOutcome:
+def _collapse_progress(text: str) -> str:
+    """Reduce carriage-return progress frames to what a terminal would have shown.
+
+    mutmut redraws its spinner with `\\r` and no newline, so one captured line holds every
+    frame. Per `\\n`-delimited line, keep the text after the last `\\r`, falling back to the
+    previous segment when that is empty (a line ending in a bare `\\r` is CRLF content, not a
+    frame), and strip the padding mutmut appends to frames.
+    """
+    lines = []
+    for line in text.split("\n"):
+        if "\r" not in line:
+            lines.append(line)
+            continue
+        segments = line.split("\r")
+        frame = segments[-1] or (segments[-2] if len(segments) > 1 else "")
+        lines.append(frame.rstrip(" ") if "\r" in line.rstrip("\r") else frame)
+    return "\n".join(lines)
+
+
+def _decode(stream: "bytes | str") -> str:
+    """Decode a captured stream without letting text mode rewrite `\\r` into `\\n`."""
+    return stream.decode("utf-8", errors="replace") if isinstance(stream, bytes) else stream
+
+
+def _run_command(command: list[str], cwd: Optional[str] = None, collapse_progress: bool = False) -> _CommandOutcome:
     """Helper function to run a shell command and return its output plus any diagnostics.
 
     stdout is always preserved: mutmut exits non-zero when it finds survivors, which is a
@@ -99,15 +123,28 @@ def _run_command(command: list[str], cwd: Optional[str] = None) -> _CommandOutco
     deprecation warning, for example) is labelled `Warning:` so callers do not treat it as
     a failed call. `failed` carries the exit code (or an exception) as explicit status so
     callers never have to sniff the text.
+
+    Streams are captured as bytes so mutmut's `\\r` progress frames survive until
+    `collapse_progress` can collapse them; otherwise text mode would turn each frame into
+    its own line. Without it, newlines are normalized exactly as text mode would.
     """
     try:
-        result = subprocess.run(command, shell=False, capture_output=True, text=True, cwd=cwd)
-        if result.stderr:
-            separator = "" if not result.stdout or result.stdout.endswith("\n") else "\n"
+        result = subprocess.run(command, shell=False, capture_output=True, cwd=cwd)
+        streams = []
+        for raw in (result.stdout, result.stderr):
+            text = _decode(raw)
+            if collapse_progress:
+                text = _collapse_progress(text)
+            else:
+                text = text.replace("\r\n", "\n").replace("\r", "\n")
+            streams.append(text)
+        stdout, stderr = streams
+        if stderr:
+            separator = "" if not stdout or stdout.endswith("\n") else "\n"
             label = "Error" if result.returncode != 0 else "Warning"
-            output = f"{result.stdout}{separator}{label}: {result.stderr}"
+            output = f"{stdout}{separator}{label}: {stderr}"
         else:
-            output = result.stdout
+            output = stdout
         return _CommandOutcome(output, failed=result.returncode != 0)
     except Exception as e:
         return _CommandOutcome(f"Exception occurred: {str(e)}", failed=True)
@@ -156,6 +193,8 @@ def _run_mutmut_cli(
         command = [mutmut_path] + args
     else:
         command = ["mutmut"] + args
+    if args[:1] == ["run"]:
+        return _run_command(command, cwd=project_path, collapse_progress=True)
     return _run_command(command, cwd=project_path)
 
 
