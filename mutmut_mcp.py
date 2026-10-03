@@ -68,7 +68,7 @@ class _RankedMutant(TypedDict):
 
 def _canonical_project_path(project_path: Optional[str]) -> str:
     """Return one absolute path for all spellings of a project directory."""
-    return os.path.abspath(project_path or ".")
+    return os.path.realpath(os.path.abspath(project_path or "."))
 
 
 def _project_lock(project_path: str) -> threading.Lock:
