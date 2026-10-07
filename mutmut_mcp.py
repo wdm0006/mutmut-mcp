@@ -20,6 +20,7 @@ Dependencies for standalone execution with uv run:
 """
 
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -64,6 +65,37 @@ class _RankedMutant(TypedDict):
     reason: str
     raw: str
     status: str
+
+
+class _FunctionGroup(TypedDict):
+    """One function's entry in the `by_function` list `prioritize_survivors` returns."""
+
+    function: str
+    survived: int
+    no_tests: int
+    mutants: list[str]
+
+
+def _function_key(name: str) -> str:
+    """Return the function a mutant belongs to by dropping a trailing `__mutmut_<n>`.
+
+    Heuristic over mutmut 3.x names (`pkg.mod.x_<func>__mutmut_<n>`): only the final
+    suffix is removed, so `x_Class__method__mutmut_3` keeps its inner `__`. Names
+    without the suffix are returned unchanged.
+    """
+    return re.sub(r"__mutmut_[0-9]+$", "", name)
+
+
+def _by_function(survivors: list[str], uncovered: list[str]) -> list[_FunctionGroup]:
+    """Group survivors and uncovered mutants by function, largest group first (stable on ties)."""
+    groups: dict[str, _FunctionGroup] = {}
+    for names, field in ((survivors, "survived"), (uncovered, "no_tests")):
+        for name in names:
+            key = _function_key(name)
+            group = groups.setdefault(key, {"function": key, "survived": 0, "no_tests": 0, "mutants": []})
+            group[field] += 1  # type: ignore[literal-required]
+            group["mutants"].append(name)
+    return sorted(groups.values(), key=lambda g: g["survived"] + g["no_tests"], reverse=True)
 
 
 def _canonical_project_path(project_path: Optional[str]) -> str:
@@ -370,6 +402,9 @@ def show_survivors(venv_path: Optional[str] = None, project_path: Optional[str] 
         sections.append("\n".join(survivors))
     if uncovered:
         sections.append(f"Not covered by any test ({len(uncovered)}):\n" + "\n".join(uncovered))
+    by_function = _by_function(survivors, uncovered)
+    lines = [f"{g['function']}: {g['survived']} survived, {g['no_tests']} no tests" for g in by_function]
+    sections.append(f"By function ({len(by_function)}):\n" + "\n".join(lines))
     if unresolved_note:
         sections.append(f"Incomplete results: {unresolved_note}")
     return "\n\n".join(sections)
@@ -492,6 +527,8 @@ def prioritize_survivors(venv_path: Optional[str] = None, project_path: Optional
     'survived' for one a test ran but failed to detect. Scores are a rank, not a flag —
     2 = uncovered, 1 = likely-material survivor, 0 = likely log/debug-only survivor — so
     coverage gaps sort above survivors and log/debug names sort last.
+    `by_function` groups the same mutants per function (name heuristic), largest group first,
+    as `{function, survived, no_tests, mutants}`.
     The response also includes `status_counts` for every status mutmut reported; unchecked
     or interrupted mutants add an incomplete-results note without entering the ranking.
 
@@ -503,7 +540,7 @@ def prioritize_survivors(venv_path: Optional[str] = None, project_path: Optional
     """
     grouped, status_counts, error = _result_summary(venv_path, project_path)
     if error:
-        return {"prioritized": [], "message": error, "status_counts": {}}
+        return {"prioritized": [], "message": error, "status_counts": {}, "by_function": []}
     survivors = grouped.get(STATUS_SURVIVED, [])
     uncovered = grouped.get(STATUS_NO_TESTS, [])
     if not survivors and not uncovered:
@@ -511,7 +548,7 @@ def prioritize_survivors(venv_path: Optional[str] = None, project_path: Optional
         unresolved_note = _unresolved_note(status_counts)
         if unresolved_note:
             message = f"No surviving mutants found, but {unresolved_note}"
-        return {"prioritized": [], "message": message, "status_counts": status_counts}
+        return {"prioritized": [], "message": message, "status_counts": status_counts, "by_function": []}
     noise_tokens = {"log", "debug", "print", "logger", "logging"}
     prioritized: list[_RankedMutant] = []
     for name in uncovered:
@@ -550,7 +587,12 @@ def prioritize_survivors(venv_path: Optional[str] = None, project_path: Optional
     unresolved_note = _unresolved_note(status_counts)
     if unresolved_note:
         message = f"{message} Incomplete results: {unresolved_note}"
-    return {"prioritized": prioritized, "message": message, "status_counts": status_counts}
+    return {
+        "prioritized": prioritized,
+        "message": message,
+        "status_counts": status_counts,
+        "by_function": _by_function(survivors, uncovered),
+    }
 
 
 def main():
