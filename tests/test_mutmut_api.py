@@ -19,6 +19,7 @@ from mutmut_mcp import (
     _status_counts,
     _survivor_names,
     clean_mutmut_cache,
+    mutation_score,
     prioritize_survivors,
     rerun_mutmut_on_survivor,
     run_mutmut,
@@ -591,6 +592,7 @@ class TestMutatingOperationLocks:
             ("show_survivors", False),
             ("show_mutant", False),
             ("prioritize_survivors", False),
+            ("mutation_score", False),
         ],
     )
     def test_busy_error_is_documented_in_the_mcp_schema(self, tool_name, documented):
@@ -1007,3 +1009,91 @@ class TestByFunction:
         assert show_survivors().endswith(
             "By function (2):\nm.x_b: 1 survived, 1 no tests\nm.x_a: 1 survived, 0 no tests"
         )
+
+
+# ---------------------------------------------------------------------------
+# mutation_score
+# ---------------------------------------------------------------------------
+
+
+class TestMutationScore:
+    @patch("mutmut_mcp._run_mutmut_cli")
+    def test_mixed_fixture_exact_values(self, mock_cli):
+        mock_cli.return_value = _CommandOutcome(
+            "    m.x_a__mutmut_1: killed\n"
+            "    m.x_a__mutmut_2: killed\n"
+            "    m.x_a__mutmut_3: survived\n"
+            "    m.x_b__mutmut_1: no tests\n"
+            "    m.x_b__mutmut_2: timeout\n"
+            "    m.x_c__mutmut_1: killed\n",
+            failed=False,
+        )
+        result = mutation_score("/v", "/p")
+        assert result == {
+            "total": 6,
+            "status_counts": {"killed": 3, "survived": 1, "no tests": 1, "timeout": 1},
+            "killed": 3,
+            "undetected": 2,
+            "score": 0.5,
+            "message": "3 of 6 mutants killed; 2 undetected.",
+        }
+        mock_cli.assert_called_once_with(["results", "--all", "true"], "/v", "/p")
+
+    @patch("mutmut_mcp._run_mutmut_cli")
+    def test_score_rounds_to_four_places(self, mock_cli):
+        mock_cli.return_value = _CommandOutcome("    m.a: killed\n    m.b: killed\n    m.c: survived\n", failed=False)
+        assert mutation_score()["score"] == 0.6667
+
+    @patch("mutmut_mcp._run_mutmut_cli")
+    def test_all_killed_scores_one(self, mock_cli):
+        mock_cli.return_value = _CommandOutcome("    m.a: killed\n", failed=False)
+        result = mutation_score()
+        assert result["score"] == 1.0
+        assert result["undetected"] == 0
+
+    @patch("mutmut_mcp._run_mutmut_cli")
+    def test_empty_results_have_no_score(self, mock_cli):
+        mock_cli.return_value = _CommandOutcome("", failed=False)
+        assert mutation_score() == {
+            "total": 0,
+            "status_counts": {},
+            "killed": 0,
+            "undetected": 0,
+            "score": None,
+            "message": "No mutation results yet - run a campaign first.",
+        }
+
+    @pytest.mark.parametrize(
+        ("status", "note"),
+        [
+            ("not checked", "1 mutant is not checked"),
+            ("check was interrupted by user", "1 mutant check was interrupted by the user"),
+        ],
+    )
+    @patch("mutmut_mcp._run_mutmut_cli")
+    def test_incomplete_results_have_no_score(self, mock_cli, status, note):
+        mock_cli.return_value = _CommandOutcome(f"    m.a: killed\n    m.b: {status}\n", failed=False)
+        result = mutation_score()
+        assert result["score"] is None
+        assert result["total"] == 2
+        assert result["killed"] == 1
+        assert result["message"] == (
+            f"Incomplete results, score not computed: {note} — run mutmut again for a complete picture."
+        )
+
+    @patch("mutmut_mcp._run_mutmut_cli")
+    def test_lookup_failure_returns_empty_shape_with_error(self, mock_cli):
+        mock_cli.return_value = _CommandOutcome("Error: boom", failed=True)
+        assert mutation_score() == {
+            "total": 0,
+            "status_counts": {},
+            "killed": 0,
+            "undetected": 0,
+            "score": None,
+            "message": "Error: boom",
+        }
+
+    @patch("mutmut_mcp._run_mutmut_cli")
+    def test_junk_lines_are_not_counted(self, mock_cli):
+        mock_cli.return_value = _CommandOutcome("    m.a: killed\nWarning: x: y\n", failed=False)
+        assert mutation_score()["total"] == 1
