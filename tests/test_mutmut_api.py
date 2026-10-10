@@ -9,6 +9,7 @@ import mutmut_mcp
 from mutmut_mcp import (
     _canonical_project_path,
     _CommandOutcome,
+    _function_key,
     _get_mutmut_path,
     _parse_results,
     _project_lock,
@@ -626,7 +627,12 @@ class TestShowSurvivors:
             "mymodule.x_logger_setup__mutmut_1\n"
             "\n"
             "Not covered by any test (1):\n"
-            "mymodule.x_helper__mutmut_2"
+            "mymodule.x_helper__mutmut_2\n"
+            "\n"
+            "By function (3):\n"
+            "mymodule.x_core_logic: 1 survived, 0 no tests\n"
+            "mymodule.x_logger_setup: 1 survived, 0 no tests\n"
+            "mymodule.x_helper: 0 survived, 1 no tests"
         )
 
     @patch("mutmut_mcp._run_command")
@@ -635,7 +641,10 @@ class TestShowSurvivors:
         mock_cmd.return_value = _CommandOutcome(
             "    mod.x_a__mutmut_1: survived\n    mod.x_b__mutmut_1: survived\n", failed=False
         )
-        assert show_survivors() == "mod.x_a__mutmut_1\nmod.x_b__mutmut_1"
+        assert show_survivors() == (
+            "mod.x_a__mutmut_1\nmod.x_b__mutmut_1\n\n"
+            "By function (2):\nmod.x_a: 1 survived, 0 no tests\nmod.x_b: 1 survived, 0 no tests"
+        )
 
     @patch("mutmut_mcp._run_command")
     def test_uncovered_without_survivors_is_reported(self, mock_cmd):
@@ -645,7 +654,10 @@ class TestShowSurvivors:
         result = show_survivors()
         assert result != "No surviving mutants found."
         assert "No surviving mutants found." not in result
-        assert result == "Not covered by any test (2):\nmod.x_a__mutmut_1\nmod.x_b__mutmut_1"
+        assert result == (
+            "Not covered by any test (2):\nmod.x_a__mutmut_1\nmod.x_b__mutmut_1\n\n"
+            "By function (2):\nmod.x_a: 0 survived, 1 no tests\nmod.x_b: 0 survived, 1 no tests"
+        )
 
     @patch("mutmut_mcp._run_command")
     def test_no_survivors(self, mock_cmd):
@@ -926,3 +938,72 @@ def test_status_counts_counts_every_parsed_status():
         "survived": 1,
         "not checked": 2,
     }
+
+
+@pytest.mark.parametrize(
+    "name, expected",
+    [
+        ("pkg.module.x_add__mutmut_1", "pkg.module.x_add"),
+        ("pkg.module.x_Class__method__mutmut_12", "pkg.module.x_Class__method"),
+        ("pkg.mod.xǁKlassǁrun__mutmut_3", "pkg.mod.xǁKlassǁrun"),
+        ("pkg.module.x_add", "pkg.module.x_add"),
+        ("pkg.module.x_add__mutmut_", "pkg.module.x_add__mutmut_"),
+        ("pkg.module.x_add__mutmut_1_extra", "pkg.module.x_add__mutmut_1_extra"),
+        ("pkg.module.x_add__mutmut_1__mutmut_2", "pkg.module.x_add__mutmut_1"),
+        ("", ""),
+    ],
+)
+def test_function_key(name, expected):
+    assert _function_key(name) == expected
+
+
+class TestByFunction:
+    @patch("mutmut_mcp._run_command")
+    def test_groups_counts_and_order_with_mixed_statuses(self, mock_cmd):
+        mock_cmd.return_value = _CommandOutcome(
+            "    m.x_a__mutmut_1: survived\n"
+            "    m.x_b__mutmut_1: no tests\n"
+            "    m.x_c__mutmut_1: survived\n"
+            "    m.x_b__mutmut_2: no tests\n"
+            "    m.x_a__mutmut_2: no tests\n"
+            "    m.x_d__mutmut_1: timeout\n"
+            "    m.x_c__mutmut_2: survived\n"
+            "    m.x_c__mutmut_3: survived\n",
+            failed=False,
+        )
+        result = prioritize_survivors()
+        assert result["by_function"] == [
+            {
+                "function": "m.x_c",
+                "survived": 3,
+                "no_tests": 0,
+                "mutants": ["m.x_c__mutmut_1", "m.x_c__mutmut_2", "m.x_c__mutmut_3"],
+            },
+            {"function": "m.x_a", "survived": 1, "no_tests": 1, "mutants": ["m.x_a__mutmut_1", "m.x_a__mutmut_2"]},
+            {"function": "m.x_b", "survived": 0, "no_tests": 2, "mutants": ["m.x_b__mutmut_1", "m.x_b__mutmut_2"]},
+        ]
+        assert [e["mutant_id"] for e in result["prioritized"]][:2] == ["m.x_b__mutmut_1", "m.x_b__mutmut_2"]
+
+    @patch("mutmut_mcp._run_command")
+    def test_ties_keep_first_seen_order(self, mock_cmd):
+        mock_cmd.return_value = _CommandOutcome(
+            "    m.x_z__mutmut_1: survived\n    m.x_a__mutmut_1: survived\n", failed=False
+        )
+        assert [g["function"] for g in prioritize_survivors()["by_function"]] == ["m.x_z", "m.x_a"]
+
+    @patch("mutmut_mcp._run_command")
+    def test_empty_and_error_results_have_empty_by_function(self, mock_cmd):
+        mock_cmd.return_value = _CommandOutcome("", failed=False)
+        assert prioritize_survivors()["by_function"] == []
+        mock_cmd.return_value = _CommandOutcome("boom", failed=True)
+        assert prioritize_survivors()["by_function"] == []
+
+    @patch("mutmut_mcp._run_command")
+    def test_show_survivors_summary_orders_by_total(self, mock_cmd):
+        mock_cmd.return_value = _CommandOutcome(
+            "    m.x_a__mutmut_1: survived\n    m.x_b__mutmut_1: survived\n    m.x_b__mutmut_2: no tests\n",
+            failed=False,
+        )
+        assert show_survivors().endswith(
+            "By function (2):\nm.x_b: 1 survived, 1 no tests\nm.x_a: 1 survived, 0 no tests"
+        )
