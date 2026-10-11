@@ -38,6 +38,7 @@ MUTMUT_LEGACY_CACHE_PATH = ".mutmut-cache"
 # `mutmut results` statuses this server reasons about.
 STATUS_SURVIVED = "survived"
 STATUS_NO_TESTS = "no tests"
+STATUS_KILLED = "killed"
 STATUS_NOT_CHECKED = "not checked"
 STATUS_INTERRUPTED = "check was interrupted by user"
 
@@ -324,15 +325,19 @@ def _status_counts(results: list[tuple[str, str]]) -> dict[str, int]:
 
 
 def _result_summary(
-    venv_path: Optional[str] = None, project_path: Optional[str] = None
+    venv_path: Optional[str] = None, project_path: Optional[str] = None, include_killed: bool = False
 ) -> tuple[dict[str, list[str]], dict[str, int], str]:
     """Return (names_by_status, status_counts, error) from one results call.
+
+    With `include_killed` the call is `mutmut results --all true`, so counts cover the
+    whole campaign rather than only the mutants the default view lists.
 
     `error` is a non-empty string only when the underlying call failed by its explicit
     status — a non-zero exit, an exception, or a local validation error — never because
     of how the output text begins.
     """
-    outcome = _run_mutmut_cli(["results"], venv_path, project_path)
+    args = ["results", "--all", "true"] if include_killed else ["results"]
+    outcome = _run_mutmut_cli(args, venv_path, project_path)
     if outcome.failed:
         return {}, {}, outcome.output
     results = _parse_results(outcome.output)
@@ -593,6 +598,48 @@ def prioritize_survivors(venv_path: Optional[str] = None, project_path: Optional
         "status_counts": status_counts,
         "by_function": _by_function(survivors, uncovered),
     }
+
+
+@mcp.tool()
+def mutation_score(venv_path: Optional[str] = None, project_path: Optional[str] = None) -> dict:
+    """
+    Report the campaign's mutation score from one `mutmut results --all true` read.
+
+    Returns `total` (every parsed mutant), `status_counts`, `killed`, `undetected`
+    ('survived' plus 'no tests'), `score` (killed / total, rounded to 4 places) and a
+    `message`. `score` is null when there are no results yet or when results are
+    incomplete (unchecked or interrupted mutants), so a partial campaign never reports a
+    misleading number. Use it to check whether the score improved after test edits.
+
+    Args:
+        venv_path (Optional[str]): Path to the project's virtual environment. A relative path is
+            resolved against `project_path`. Defaults to None.
+        project_path (Optional[str]): Directory holding the project's mutmut configuration and state.
+            Defaults to the server's working directory.
+    """
+    grouped, status_counts, error = _result_summary(venv_path, project_path, include_killed=True)
+    if error:
+        return {"total": 0, "status_counts": {}, "killed": 0, "undetected": 0, "score": None, "message": error}
+    total = sum(status_counts.values())
+    killed = status_counts.get(STATUS_KILLED, 0)
+    undetected = status_counts.get(STATUS_SURVIVED, 0) + status_counts.get(STATUS_NO_TESTS, 0)
+    result: dict = {
+        "total": total,
+        "status_counts": status_counts,
+        "killed": killed,
+        "undetected": undetected,
+        "score": None,
+    }
+    if total == 0:
+        result["message"] = "No mutation results yet - run a campaign first."
+        return result
+    unresolved_note = _unresolved_note(status_counts)
+    if unresolved_note:
+        result["message"] = f"Incomplete results, score not computed: {unresolved_note}"
+        return result
+    result["score"] = round(killed / total, 4)
+    result["message"] = f"{killed} of {total} mutants killed; {undetected} undetected."
+    return result
 
 
 def main():

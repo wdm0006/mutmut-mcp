@@ -59,6 +59,7 @@ The following tools are available:
 - `clean_mutmut_cache(venv_path=None, project_path=None)` – Remove mutmut's `mutants/` state directory and legacy cache for the project
 - `show_mutant(mutation_id, venv_path=None, project_path=None)` – Show the code diff and details for one named mutant
 - `prioritize_survivors(venv_path=None, project_path=None)` – Rank survivors and uncovered mutants by likely materiality, highest score first
+- `mutation_score(venv_path=None, project_path=None)` – Killed/total counts and the mutation score (`null` when there are no results or the run is incomplete) from one `mutmut results --all true` read
 
 ### `project_path`
 
