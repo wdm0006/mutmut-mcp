@@ -593,6 +593,7 @@ class TestMutatingOperationLocks:
             ("show_mutant", False),
             ("prioritize_survivors", False),
             ("mutation_score", False),
+            ("mutmut_run_status", False),
         ],
     )
     def test_busy_error_is_documented_in_the_mcp_schema(self, tool_name, documented):

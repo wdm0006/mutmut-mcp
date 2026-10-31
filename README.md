@@ -53,6 +53,8 @@ npx -y @smithery/cli install @wdm0006/mutmut-mcp --client claude
 The following tools are available:
 
 - `run_mutmut(target, options="", venv_path=None, project_path=None)` – Run a mutation testing session (`mutmut run`) for the project; survivors are expected and are a result, not a failure
+- `start_mutmut_run(target="", options="", venv_path=None, project_path=None)` – Start `mutmut run` in a background thread and return `{run_id, state}` immediately; holds the project's write lock until it ends (other write tools return the busy error)
+- `mutmut_run_status(run_id)` – `{state: running|finished|failed, elapsed_s, exit_failed, output_tail, progress}` for a background run; unknown ids return an error (the newest 20 jobs are kept, in memory only)
 - `show_results(venv_path=None, project_path=None)` – Show the last campaign's results per mutant name and status
 - `show_survivors(venv_path=None, project_path=None)` – List surviving mutations, plus a labelled section for mutants no test covers
 - `rerun_mutmut_on_survivor(mutation_id=None, venv_path=None, project_path=None)` – Rerun a specific mutant (`mutmut run <name>`) or all surviving mutants
