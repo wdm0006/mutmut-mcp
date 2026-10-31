@@ -153,3 +153,22 @@ def test_partial_rerun_reports_real_unchecked_mutants(tmp_path, monkeypatch):
     assert report != "No surviving mutants found."
     noun = "mutant is" if len(unchecked) == 1 else "mutants are"
     assert f"{len(unchecked)} {noun} not checked" in report
+
+
+def test_background_run_against_real_cli(mutmut_project):
+    import time
+
+    from mutmut_mcp import mutmut_run_status, start_mutmut_run
+
+    started = start_mutmut_run(options="--max-children 1", project_path=str(mutmut_project))
+    assert started["state"] == "running"
+    for _ in range(600):
+        status = mutmut_run_status(started["run_id"])
+        if status["state"] != "running":
+            break
+        time.sleep(0.1)
+    assert status["state"] == "finished"
+    assert status["exit_failed"] is False
+    assert "\r" not in status["output_tail"]
+    assert status["progress"] is not None
+    assert (mutmut_project / "mutants").is_dir()

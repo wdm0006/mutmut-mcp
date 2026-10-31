@@ -24,6 +24,8 @@ import re
 import shutil
 import subprocess
 import threading
+import time
+import uuid
 from typing import NamedTuple, Optional, TypedDict
 
 from fastmcp import FastMCP
@@ -44,6 +46,11 @@ STATUS_INTERRUPTED = "check was interrupted by user"
 
 _project_locks: dict[str, threading.Lock] = {}
 _project_locks_lock = threading.Lock()
+
+MAX_JOBS = 20
+OUTPUT_TAIL_CHARS = 4000
+_jobs: dict[str, "_Job"] = {}
+_jobs_lock = threading.Lock()
 
 
 class _CommandOutcome(NamedTuple):
@@ -273,6 +280,116 @@ def run_mutmut(
         return _run_mutmut_cli(args, venv_path, canonical_project).output
     finally:
         lock.release()
+
+
+class _Job:
+    """One background `mutmut run`; `done` is set (under `_jobs_lock`) to (outcome, elapsed_s) when it ends."""
+
+    def __init__(self) -> None:
+        self.started = time.monotonic()
+        self.done: Optional[tuple[_CommandOutcome, float]] = None
+
+
+def _prune_jobs() -> None:
+    """Keep only the newest MAX_JOBS jobs, evicting the oldest finished ones. Caller holds `_jobs_lock`."""
+    finished = [run_id for run_id, job in _jobs.items() if job.done is not None]
+    for run_id in finished[: max(len(_jobs) - MAX_JOBS, 0)]:
+        del _jobs[run_id]
+
+
+def _run_job(run_id: str, job: _Job, lock: threading.Lock, args: list[str], venv_path, project_path) -> None:
+    try:
+        outcome = _run_mutmut_cli(args, venv_path, project_path)
+    except Exception as e:
+        outcome = _CommandOutcome(f"Exception occurred: {e}", failed=True)
+    finally:
+        lock.release()
+    with _jobs_lock:
+        job.done = (outcome, time.monotonic() - job.started)
+        _prune_jobs()
+
+
+@mcp.tool()
+def start_mutmut_run(
+    target: str = "", options: str = "", venv_path: Optional[str] = None, project_path: Optional[str] = None
+) -> dict:
+    """
+    Start `mutmut run` in the background and return immediately with `{run_id, state}`.
+
+    Use this instead of `run_mutmut` for long campaigns, then poll `mutmut_run_status(run_id)`.
+    Arguments match `run_mutmut`. The job holds the project's write lock until it ends, so
+    `run_mutmut`, `rerun_mutmut_on_survivor` and `clean_mutmut_cache` on the same project return
+    the busy error meanwhile. If the lock is held or the arguments are invalid, no job starts and
+    the result is `{run_id: null, state: "failed", error}`. Jobs live in server memory only (the
+    newest 20 are kept).
+
+    Args:
+        target (str): Optional space-separated mutant-name filter(s) to run. Empty runs all mutants.
+        options (str): Additional `mutmut run` flags (e.g., '--max-children 4'). Defaults to empty.
+        venv_path (Optional[str]): Path to the project's virtual environment to use for running mutmut.
+        project_path (Optional[str]): Directory to run mutmut in. Defaults to the server's working directory.
+    """
+    args = ["run"] + target.split() + options.split()
+    error = _validate_project_path(project_path)
+    if error:
+        return {"run_id": None, "state": "failed", "error": error}
+    canonical_project = _canonical_project_path(project_path)
+    lock = _project_lock(canonical_project)
+    if not lock.acquire(blocking=False):
+        return {"run_id": None, "state": "failed", "error": _busy_error(canonical_project)}
+    run_id = uuid.uuid4().hex[:12]
+    job = _Job()
+    try:
+        with _jobs_lock:
+            _jobs[run_id] = job
+        threading.Thread(
+            target=_run_job, args=(run_id, job, lock, args, venv_path, canonical_project), daemon=True
+        ).start()
+    except Exception as e:
+        lock.release()
+        with _jobs_lock:
+            _jobs.pop(run_id, None)
+        return {"run_id": None, "state": "failed", "error": f"Error: could not start background run: {e}"}
+    return {"run_id": run_id, "state": "running"}
+
+
+@mcp.tool()
+def mutmut_run_status(run_id: str) -> dict:
+    """
+    Report the state of a background run started with `start_mutmut_run`.
+
+    Returns `{state, elapsed_s, exit_failed, output_tail, progress}`. `state` is `running`,
+    `finished` or `failed` (mutmut exited non-zero or could not be launched). While running,
+    `exit_failed` is null, `output_tail` is empty and `progress` is null; once done,
+    `output_tail` is the end of the collapsed run output and `progress` is mutmut's last
+    `done/total` count (e.g. `3/3`). An unknown `run_id` returns `{state: "unknown", error}`.
+
+    Args:
+        run_id (str): The id returned by `start_mutmut_run`.
+    """
+    with _jobs_lock:
+        job = _jobs.get(run_id)
+        if job is None:
+            return {"state": "unknown", "error": f"Error: unknown run_id {run_id!r}."}
+        done = job.done
+    if done is None:
+        return {
+            "state": "running",
+            "elapsed_s": round(time.monotonic() - job.started, 1),
+            "exit_failed": None,
+            "output_tail": "",
+            "progress": None,
+        }
+    outcome, elapsed = done
+    frames = re.findall(r"(\d+/\d+)\s+\U0001f389", outcome.output)
+    progress = frames[-1] if frames else None
+    return {
+        "state": "failed" if outcome.failed else "finished",
+        "elapsed_s": round(elapsed, 1),
+        "exit_failed": outcome.failed,
+        "output_tail": outcome.output[-OUTPUT_TAIL_CHARS:],
+        "progress": progress,
+    }
 
 
 @mcp.tool()
