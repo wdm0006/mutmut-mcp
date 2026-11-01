@@ -6,7 +6,7 @@ survivor must be killed by a named test; raising the budget in CI requires a
 waiver recorded here with the mutant, the mutated code, and why no test can
 (or should) distinguish it.
 
-Campaign at time of writing: 423 mutants, 417 detected (98.6%), 6 waived.
+Campaign at time of writing: 411 mutants, 405 detected (98.5%), 6 waived.
 
 ## `mutmut_mcp.x__run_command__mutmut_13` — `shell=False` → `shell=None`
 
