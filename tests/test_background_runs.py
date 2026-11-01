@@ -170,13 +170,13 @@ def test_running_jobs_are_never_evicted(tmp_path):
         _wait_done(second)
 
 
-def test_tool_schemas_list_ten_tools_with_documented_signatures():
+def test_tool_schemas_list_eleven_tools_with_documented_signatures():
     async def names():
         return await mutmut_mcp.mcp.list_tools()
 
     tools = asyncio.run(names())
     by_name = {t.name: t for t in tools}
-    assert len(by_name) == 10
+    assert len(by_name) == 11
     assert {"start_mutmut_run", "mutmut_run_status"} <= set(by_name)
     assert set(by_name["start_mutmut_run"].parameters["properties"]) == {
         "target",
@@ -186,3 +186,154 @@ def test_tool_schemas_list_ten_tools_with_documented_signatures():
     }
     assert by_name["mutmut_run_status"].parameters["required"] == ["run_id"]
     assert "write lock" in by_name["start_mutmut_run"].description
+
+
+SLEEPER = ["python3", "-c", "import time; print('started', flush=True); time.sleep(60)"]
+
+
+def _start_sleeper(tmp_path):
+    """Start a real job whose subprocess is a long sleep, through the real `_run_command` path."""
+    ready = threading.Event()
+    real = mutmut_mcp._run_tracked
+
+    def tracked(job, command, cwd):
+        ready.set()
+        return real(job, SLEEPER, cwd)
+
+    patcher = patch("mutmut_mcp._run_tracked", tracked)
+    patcher.start()
+    run_id = start_mutmut_run(project_path=str(tmp_path))["run_id"]
+    assert ready.wait(5)
+    for _ in range(500):
+        if mutmut_mcp._jobs[run_id].proc is not None:
+            break
+        threading.Event().wait(0.01)
+    return run_id, patcher
+
+
+def test_cancel_stops_subprocess_frees_lock_and_reports_cancelled(tmp_path):
+    with patch("mutmut_mcp._run_mutmut_cli", side_effect=lambda a, v, p: mutmut_mcp._run_command(["x"], cwd=p)):
+        run_id, patcher = _start_sleeper(tmp_path)
+        try:
+            proc = mutmut_mcp._jobs[run_id].proc
+            assert proc is not None and proc.poll() is None
+            assert run_mutmut(project_path=str(tmp_path)).startswith("Error: a mutmut operation is already")
+
+            result = mutmut_mcp.cancel_mutmut_run(run_id)
+        finally:
+            patcher.stop()
+    assert result["state"] == "cancelled"
+    assert "may be partial" in result["message"]
+    assert proc.poll() is not None
+    status = mutmut_run_status(run_id)
+    assert status["state"] == "cancelled"
+    assert status["exit_failed"] is True
+    assert "may be partial" in status["note"]
+    assert status["elapsed_s"] < 30
+    with patch("mutmut_mcp._run_mutmut_cli", return_value=_CommandOutcome("ok", failed=False)):
+        assert run_mutmut(project_path=str(tmp_path)) == "ok"
+
+
+def test_cancel_escalates_to_sigkill_when_sigterm_is_ignored(tmp_path):
+    ignorer = [
+        "python3",
+        "-c",
+        "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('r', flush=True); time.sleep(60)",
+    ]
+    real = mutmut_mcp._run_tracked
+    with (
+        patch("mutmut_mcp._run_tracked", lambda job, command, cwd: real(job, ignorer, cwd)),
+        patch("mutmut_mcp._run_mutmut_cli", side_effect=lambda a, v, p: mutmut_mcp._run_command(["x"], cwd=p)),
+        patch("mutmut_mcp.CANCEL_GRACE_S", 0.5),
+    ):
+        run_id = start_mutmut_run(project_path=str(tmp_path))["run_id"]
+        for _ in range(500):
+            proc = mutmut_mcp._jobs[run_id].proc
+            if proc is not None:
+                break
+            threading.Event().wait(0.01)
+        threading.Event().wait(0.5)
+        result = mutmut_mcp.cancel_mutmut_run(run_id)
+    assert result["state"] == "cancelled"
+    assert proc is not None and proc.returncode == -9
+
+
+def test_cancel_finished_job_is_a_noop_with_message(tmp_path):
+    with patch("mutmut_mcp._run_mutmut_cli", return_value=_CommandOutcome(FRAMES, failed=False)):
+        run_id = start_mutmut_run(project_path=str(tmp_path))["run_id"]
+        _wait_done(run_id)
+    before = mutmut_run_status(run_id)
+    result = mutmut_mcp.cancel_mutmut_run(run_id)
+    assert result == {"state": "finished", "message": f"Run {run_id} already ended (finished); nothing to cancel."}
+    assert mutmut_run_status(run_id) == before
+
+
+def test_cancel_unknown_run_id():
+    assert mutmut_mcp.cancel_mutmut_run("nope") == {
+        "state": "unknown",
+        "message": "Error: unknown run_id 'nope'.",
+    }
+
+
+def test_cancel_before_subprocess_spawns_still_stops_it(tmp_path):
+    job = mutmut_mcp._Job()
+    job.cancelled = True
+    proc = None
+    try:
+        real_popen = mutmut_mcp.subprocess.Popen
+        with patch("mutmut_mcp.subprocess.Popen", lambda *a, **k: real_popen(SLEEPER, **k)):
+            result = mutmut_mcp._run_tracked(job, ["x"], str(tmp_path))
+        proc = job.proc
+    finally:
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+    assert result.returncode == -15
+
+
+def test_cancel_tool_is_registered_with_run_id_only():
+    tool = asyncio.run(mutmut_mcp.mcp.get_tool("cancel_mutmut_run"))
+    assert tool is not None
+    assert tool.parameters["required"] == ["run_id"]
+    assert tool.description is not None
+    assert "write lock" in tool.description
+    assert "partial" in tool.description
+
+
+def test_cancel_reports_still_running_when_process_will_not_die(tmp_path):
+    gate = _Gate(_CommandOutcome(FRAMES, failed=False))
+    with patch("mutmut_mcp._run_mutmut_cli", gate), patch("mutmut_mcp.CANCEL_GRACE_S", 0.05):
+        run_id = start_mutmut_run(project_path=str(tmp_path))["run_id"]
+        assert gate.started.wait(5)
+        result = mutmut_mcp.cancel_mutmut_run(run_id)
+        gate.release.set()
+    assert result == {"state": "running", "message": f"Run {run_id} did not stop yet; call cancel_mutmut_run again."}
+
+
+def test_run_tracked_returns_what_subprocess_run_would(tmp_path):
+    import sys
+
+    job = mutmut_mcp._Job()
+    code = "import os,sys; print(os.getcwd()); print('oops', file=sys.stderr); sys.exit(3)"
+    command = [sys.executable, "-c", code]
+    result = mutmut_mcp._run_tracked(job, command, str(tmp_path))
+    assert result.args == command
+    assert result.returncode == 3
+    assert result.stdout.decode().strip() == str(tmp_path.resolve())
+    assert result.stderr.decode().strip() == "oops"
+    assert job.proc is not None and job.proc.returncode == 3
+    assert job.cancelled is False
+
+
+def test_run_command_uses_tracked_path_only_inside_a_job_worker(tmp_path):
+    import sys
+
+    command = [sys.executable, "-c", "import os; print(os.getcwd())"]
+    job = mutmut_mcp._Job()
+    mutmut_mcp._worker.job = job
+    try:
+        outcome = mutmut_mcp._run_command(command, cwd=str(tmp_path))
+    finally:
+        del mutmut_mcp._worker.job
+    assert outcome == _CommandOutcome(str(tmp_path.resolve()) + "\n", failed=False)
+    assert job.proc is not None
+    assert mutmut_mcp._run_command(command, cwd=str(tmp_path)).output == str(tmp_path.resolve()) + "\n"
