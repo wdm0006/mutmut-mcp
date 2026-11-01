@@ -22,6 +22,7 @@ Dependencies for standalone execution with uv run:
 import os
 import re
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -49,8 +50,11 @@ _project_locks_lock = threading.Lock()
 
 MAX_JOBS = 20
 OUTPUT_TAIL_CHARS = 4000
+CANCELLED_NOTE = "mutmut state in mutants/ may be partial; unfinished mutants show as 'not checked'."
 _jobs: dict[str, "_Job"] = {}
 _jobs_lock = threading.Lock()
+CANCEL_GRACE_S = 5.0
+_worker = threading.local()
 
 
 class _CommandOutcome(NamedTuple):
@@ -151,6 +155,36 @@ def _decode(stream: "bytes | str") -> str:
     return stream.decode(errors="replace") if isinstance(stream, bytes) else stream
 
 
+def _signal_job(job: "_Job", sig: int) -> None:
+    """Send `sig` to the job's subprocess group (or the process itself on Windows), if it has started."""
+    with _jobs_lock:
+        proc = job.proc
+    if proc is None or proc.poll() is not None:
+        return
+    if os.name == "nt":  # pragma: no cover  # pragma: no mutate
+        proc.terminate() if sig == signal.SIGTERM else proc.kill()  # pragma: no mutate
+    else:
+        os.killpg(proc.pid, sig)
+
+
+def _run_tracked(job: "_Job", command: list[str], cwd: Optional[str]) -> "subprocess.CompletedProcess[bytes]":
+    """`subprocess.run` equivalent that records the `Popen` on `job` so `cancel_mutmut_run` can stop it."""
+    proc = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=cwd,
+        start_new_session=os.name != "nt",  # pragma: no mutate
+    )
+    with _jobs_lock:
+        job.proc = proc
+        cancelled = job.cancelled
+    if cancelled:
+        _signal_job(job, signal.SIGTERM)
+    stdout, stderr = proc.communicate()
+    return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
+
+
 def _run_command(command: list[str], cwd: Optional[str] = None, collapse_progress: bool = False) -> _CommandOutcome:
     """Helper function to run a shell command and return its output plus any diagnostics.
 
@@ -166,7 +200,11 @@ def _run_command(command: list[str], cwd: Optional[str] = None, collapse_progres
     its own line. Without it, newlines are normalized exactly as text mode would.
     """
     try:
-        result = subprocess.run(command, shell=False, capture_output=True, cwd=cwd)
+        job = getattr(_worker, "job", None)
+        if job is None:
+            result = subprocess.run(command, shell=False, capture_output=True, cwd=cwd)
+        else:
+            result = _run_tracked(job, command, cwd)
         streams = []
         for raw in (result.stdout, result.stderr):
             text = _decode(raw)
@@ -288,6 +326,13 @@ class _Job:
     def __init__(self) -> None:
         self.started = time.monotonic()
         self.done: Optional[tuple[_CommandOutcome, float]] = None
+        self.proc: Optional["subprocess.Popen[bytes]"] = None
+        self.cancelled = False
+        self.finished = threading.Event()
+
+
+def _job_state(job: _Job, outcome: _CommandOutcome) -> str:
+    return "cancelled" if job.cancelled else "failed" if outcome.failed else "finished"
 
 
 def _prune_jobs() -> None:
@@ -298,6 +343,7 @@ def _prune_jobs() -> None:
 
 
 def _run_job(run_id: str, job: _Job, lock: threading.Lock, args: list[str], venv_path, project_path) -> None:
+    _worker.job = job
     try:
         outcome = _run_mutmut_cli(args, venv_path, project_path)
     except Exception as e:
@@ -307,6 +353,7 @@ def _run_job(run_id: str, job: _Job, lock: threading.Lock, args: list[str], venv
     with _jobs_lock:
         job.done = (outcome, time.monotonic() - job.started)
         _prune_jobs()
+    job.finished.set()
 
 
 @mcp.tool()
@@ -359,7 +406,8 @@ def mutmut_run_status(run_id: str) -> dict:
     Report the state of a background run started with `start_mutmut_run`.
 
     Returns `{state, elapsed_s, exit_failed, output_tail, progress}`. `state` is `running`,
-    `finished` or `failed` (mutmut exited non-zero or could not be launched). While running,
+    `finished`, `failed` (mutmut exited non-zero or could not be launched) or `cancelled` (see
+    `cancel_mutmut_run`; adds a `note` that mutmut state may be partial). While running,
     `exit_failed` is null, `output_tail` is empty and `progress` is null; once done,
     `output_tail` is the end of the collapsed run output and `progress` is mutmut's last
     `done/total` count (e.g. `3/3`). An unknown `run_id` returns `{state: "unknown", error}`.
@@ -383,13 +431,47 @@ def mutmut_run_status(run_id: str) -> dict:
     outcome, elapsed = done
     frames = re.findall(r"(\d+/\d+)\s+\U0001f389", outcome.output)
     progress = frames[-1] if frames else None
-    return {
-        "state": "failed" if outcome.failed else "finished",
+    status = {
+        "state": _job_state(job, outcome),
         "elapsed_s": round(elapsed, 1),
         "exit_failed": outcome.failed,
         "output_tail": outcome.output[-OUTPUT_TAIL_CHARS:],
         "progress": progress,
     }
+    if job.cancelled:
+        status["note"] = CANCELLED_NOTE
+    return status
+
+
+@mcp.tool()
+def cancel_mutmut_run(run_id: str) -> dict:
+    """
+    Cancel a background run started with `start_mutmut_run`.
+
+    Terminates the run's mutmut process (SIGTERM, then SIGKILL after a short grace), waits for
+    it to exit and frees the project's write lock, so other write tools work again. Returns
+    `{state, message}`; `state` becomes `cancelled`, as reported by `mutmut_run_status`. Mutmut's
+    results in `mutants/` may be partial afterwards (unfinished mutants show as `not checked`).
+    A run that already ended, or an unknown `run_id`, is left alone and reported in `message`.
+
+    Args:
+        run_id (str): The id returned by `start_mutmut_run`.
+    """
+    with _jobs_lock:
+        job = _jobs.get(run_id)
+        if job is None:
+            return {"state": "unknown", "message": f"Error: unknown run_id {run_id!r}."}
+        if job.done is not None:
+            state = _job_state(job, job.done[0])
+            return {"state": state, "message": f"Run {run_id} already ended ({state}); nothing to cancel."}
+        job.cancelled = True
+    _signal_job(job, signal.SIGTERM)
+    if not job.finished.wait(CANCEL_GRACE_S):
+        _signal_job(job, getattr(signal, "SIGKILL", signal.SIGTERM))
+        job.finished.wait(CANCEL_GRACE_S)
+    if not job.finished.is_set():
+        return {"state": "running", "message": f"Run {run_id} did not stop yet; call cancel_mutmut_run again."}
+    return {"state": "cancelled", "message": f"Run {run_id} cancelled. {CANCELLED_NOTE}"}
 
 
 @mcp.tool()

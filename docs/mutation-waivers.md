@@ -6,9 +6,9 @@ survivor must be killed by a named test; raising the budget in CI requires a
 waiver recorded here with the mutant, the mutated code, and why no test can
 (or should) distinguish it.
 
-Campaign at time of writing: 267 mutants, 261 detected (97.8%), 6 waived.
+Campaign at time of writing: 423 mutants, 417 detected (98.6%), 6 waived.
 
-## `mutmut_mcp.x__run_command__mutmut_4` — `shell=False` → `shell=None`
+## `mutmut_mcp.x__run_command__mutmut_13` — `shell=False` → `shell=None`
 
 ```diff
 -        result = subprocess.run(command, shell=False, capture_output=True, cwd=cwd)
@@ -18,11 +18,11 @@ Campaign at time of writing: 267 mutants, 261 detected (97.8%), 6 waived.
 Equivalent: `None` is subprocess's own default for `shell`, so both spellings
 take the identical no-shell code path. `_run_command` only ever receives argv
 lists, and `shell=True` with a list is a different mutant
-(`mutmut_mcp.x__run_command__mutmut_12`), which is killed by
+(`mutmut_mcp.x__run_command__mutmut_20`), which is killed by
 `tests/test_survivor_regressions.py::TestRunCommandSurvivors::
 test_arguments_reach_the_binary_without_shell_interpretation`.
 
-## `mutmut_mcp.x__run_command__mutmut_8` — `shell=False` removed
+## `mutmut_mcp.x__run_command__mutmut_17` — `shell=False` removed
 
 Equivalent: omitting the keyword also selects subprocess's default
 (`shell=False`). The security property is the list-argv discipline itself,
