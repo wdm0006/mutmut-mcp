@@ -55,6 +55,7 @@ _jobs: dict[str, "_Job"] = {}
 _jobs_lock = threading.Lock()
 CANCEL_GRACE_S = 5.0
 _worker = threading.local()
+_NEW_SESSION = os.name != "nt"  # own process group so cancel can signal the whole tree
 
 
 class _CommandOutcome(NamedTuple):
@@ -174,7 +175,7 @@ def _run_tracked(job: "_Job", command: list[str], cwd: Optional[str]) -> "subpro
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         cwd=cwd,
-        start_new_session=os.name != "nt",  # pragma: no mutate
+        start_new_session=_NEW_SESSION,
     )
     with _jobs_lock:
         job.proc = proc
