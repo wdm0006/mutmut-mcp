@@ -800,6 +800,28 @@ def prioritize_survivors(venv_path: Optional[str] = None, project_path: Optional
     }
 
 
+def _score_by_function(grouped: dict[str, list[str]], scored: bool) -> list[dict]:
+    """Per-function total/killed/undetected/score rows, most undetected first (naming heuristic)."""
+    stats: dict[str, list[int]] = {}
+    for status, names in grouped.items():
+        for name in names:
+            row = stats.setdefault(_function_key(name), [0, 0, 0])
+            row[0] += 1
+            row[1] += status == STATUS_KILLED
+            row[2] += status in (STATUS_SURVIVED, STATUS_NO_TESTS)
+    rows = [
+        {
+            "function": function,
+            "total": total,
+            "killed": killed,
+            "undetected": undetected,
+            "score": round(killed / total, 4) if scored else None,
+        }
+        for function, (total, killed, undetected) in stats.items()
+    ]
+    return sorted(rows, key=lambda row: (-row["undetected"], row["function"]))
+
+
 @mcp.tool()
 def mutation_score(venv_path: Optional[str] = None, project_path: Optional[str] = None) -> dict:
     """
@@ -809,7 +831,10 @@ def mutation_score(venv_path: Optional[str] = None, project_path: Optional[str] 
     ('survived' plus 'no tests'), `score` (killed / total, rounded to 4 places) and a
     `message`. `score` is null when there are no results yet or when results are
     incomplete (unchecked or interrupted mutants), so a partial campaign never reports a
-    misleading number. Use it to check whether the score improved after test edits.
+    misleading number. `by_function` lists `{function, total, killed, undetected, score}` per
+    function (grouped by mutant name, most undetected first) so you can verify a test edit improved
+    the targeted function; its `score` is null whenever the project `score` is. Use it to check
+    whether the score improved after test edits.
 
     Args:
         venv_path (Optional[str]): Path to the project's virtual environment. A relative path is
@@ -819,7 +844,15 @@ def mutation_score(venv_path: Optional[str] = None, project_path: Optional[str] 
     """
     grouped, status_counts, error = _result_summary(venv_path, project_path, include_killed=True)
     if error:
-        return {"total": 0, "status_counts": {}, "killed": 0, "undetected": 0, "score": None, "message": error}
+        return {
+            "total": 0,
+            "status_counts": {},
+            "killed": 0,
+            "undetected": 0,
+            "score": None,
+            "by_function": [],
+            "message": error,
+        }
     total = sum(status_counts.values())
     killed = status_counts.get(STATUS_KILLED, 0)
     undetected = status_counts.get(STATUS_SURVIVED, 0) + status_counts.get(STATUS_NO_TESTS, 0)
@@ -829,11 +862,13 @@ def mutation_score(venv_path: Optional[str] = None, project_path: Optional[str] 
         "killed": killed,
         "undetected": undetected,
         "score": None,
+        "by_function": [],
     }
     if total == 0:
         result["message"] = "No mutation results yet - run a campaign first."
         return result
     unresolved_note = _unresolved_note(status_counts)
+    result["by_function"] = _score_by_function(grouped, not unresolved_note)
     if unresolved_note:
         result["message"] = f"Incomplete results, score not computed: {unresolved_note}"
         return result
