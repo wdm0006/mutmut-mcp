@@ -27,7 +27,7 @@ import subprocess
 import threading
 import time
 import uuid
-from typing import NamedTuple, Optional, TypedDict
+from typing import Callable, NamedTuple, Optional, TypedDict
 
 from fastmcp import FastMCP
 
@@ -45,6 +45,16 @@ STATUS_KILLED = "killed"
 STATUS_NOT_CHECKED = "not checked"
 STATUS_INTERRUPTED = "check was interrupted by user"
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX
+    msvcrt = None  # type: ignore[assignment]
+
+LOCK_FILE_NAME = ".mutmut-mcp.lock"
 _project_locks: dict[str, threading.Lock] = {}
 _project_locks_lock = threading.Lock()
 
@@ -122,6 +132,54 @@ def _project_lock(project_path: str) -> threading.Lock:
         return _project_locks.setdefault(project_path, threading.Lock())
 
 
+def _try_file_lock(handle) -> bool:
+    """Take a non-blocking exclusive lock on `handle`; False only when another process holds it."""
+    if msvcrt is not None:  # pragma: no cover - Windows only  # pragma: no mutate
+        try:  # pragma: no mutate
+            handle.seek(0)  # pragma: no mutate
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]  # pragma: no mutate
+        except OSError:  # pragma: no mutate
+            return False  # pragma: no mutate
+        return True  # pragma: no mutate
+    if fcntl is None:  # pragma: no cover  # pragma: no mutate
+        return True  # pragma: no mutate
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _acquire_project(project_path: str) -> Optional[Callable[[], None]]:
+    """Claim a project for a mutating operation; return a release callable, or None when busy.
+
+    Layers the in-process thread lock under a cross-process advisory lock on
+    `<project>/.mutmut-mcp.lock`. If the lock file cannot be opened or the platform
+    refuses to lock, only the thread lock applies.
+    """
+    thread_lock = _project_lock(project_path)
+    if not thread_lock.acquire(blocking=False):  # pragma: no mutate
+        return None
+    try:
+        handle = open(os.path.join(project_path, LOCK_FILE_NAME), "a+")
+    except OSError:
+        return thread_lock.release
+    if not _try_file_lock(handle):
+        handle.close()
+        thread_lock.release()
+        return None
+
+    def release() -> None:
+        try:
+            handle.close()
+        finally:
+            thread_lock.release()
+
+    return release
+
+
 def _busy_error(project_path: str) -> str:
     """Return the serialized error for a concurrent mutmut call on the same project.
 
@@ -130,7 +188,8 @@ def _busy_error(project_path: str) -> str:
     would corrupt each other's scratch tree.
     """
     return (
-        f"Error: a mutmut operation is already in progress for {project_path}. "
+        f"Error: a mutmut operation is already in progress for {project_path} "
+        "(in this server or another process using the same project). "
         "Wait for it to finish before starting another."
     )
 
@@ -312,13 +371,13 @@ def run_mutmut(
     if error:
         return error
     canonical_project = _canonical_project_path(project_path)
-    lock = _project_lock(canonical_project)
-    if not lock.acquire(blocking=False):
+    release = _acquire_project(canonical_project)
+    if release is None:
         return _busy_error(canonical_project)
     try:
         return _run_mutmut_cli(args, venv_path, canonical_project).output
     finally:
-        lock.release()
+        release()
 
 
 class _Job:
@@ -343,14 +402,14 @@ def _prune_jobs() -> None:
         del _jobs[run_id]
 
 
-def _run_job(run_id: str, job: _Job, lock: threading.Lock, args: list[str], venv_path, project_path) -> None:
+def _run_job(run_id: str, job: _Job, release: Callable[[], None], args: list[str], venv_path, project_path) -> None:
     _worker.job = job
     try:
         outcome = _run_mutmut_cli(args, venv_path, project_path)
     except Exception as e:
         outcome = _CommandOutcome(f"Exception occurred: {e}", failed=True)
     finally:
-        lock.release()
+        release()
     with _jobs_lock:
         job.done = (outcome, time.monotonic() - job.started)
         _prune_jobs()
@@ -382,8 +441,8 @@ def start_mutmut_run(
     if error:
         return {"run_id": None, "state": "failed", "error": error}
     canonical_project = _canonical_project_path(project_path)
-    lock = _project_lock(canonical_project)
-    if not lock.acquire(blocking=False):
+    release = _acquire_project(canonical_project)
+    if release is None:
         return {"run_id": None, "state": "failed", "error": _busy_error(canonical_project)}
     run_id = uuid.uuid4().hex[:12]
     job = _Job()
@@ -391,10 +450,10 @@ def start_mutmut_run(
         with _jobs_lock:
             _jobs[run_id] = job
         threading.Thread(
-            target=_run_job, args=(run_id, job, lock, args, venv_path, canonical_project), daemon=True
+            target=_run_job, args=(run_id, job, release, args, venv_path, canonical_project), daemon=True
         ).start()
     except Exception as e:
-        lock.release()
+        release()
         with _jobs_lock:
             _jobs.pop(run_id, None)
         return {"run_id": None, "state": "failed", "error": f"Error: could not start background run: {e}"}
@@ -642,8 +701,8 @@ def rerun_mutmut_on_survivor(
     if error:
         return error
     canonical_project = _canonical_project_path(project_path)
-    lock = _project_lock(canonical_project)
-    if not lock.acquire(blocking=False):
+    release = _acquire_project(canonical_project)
+    if release is None:
         return _busy_error(canonical_project)
     try:
         if mutation_id:
@@ -655,7 +714,7 @@ def rerun_mutmut_on_survivor(
             return "No surviving mutants found."
         return _run_mutmut_cli(["run", *names], venv_path, canonical_project).output
     finally:
-        lock.release()
+        release()
 
 
 @mcp.tool()
@@ -680,8 +739,8 @@ def clean_mutmut_cache(venv_path: Optional[str] = None, project_path: Optional[s
     if error:
         return error
     base = _canonical_project_path(project_path)
-    lock = _project_lock(base)
-    if not lock.acquire(blocking=False):
+    release = _acquire_project(base)
+    if release is None:
         return _busy_error(base)
     removed = []
     try:
@@ -696,7 +755,7 @@ def clean_mutmut_cache(venv_path: Optional[str] = None, project_path: Optional[s
     except Exception as e:
         return f"Failed to clear mutmut state: {str(e)}"
     finally:
-        lock.release()
+        release()
     if removed:
         return f"Mutmut state cleared successfully ({', '.join(removed)})."
     return "No mutmut state found to clear."

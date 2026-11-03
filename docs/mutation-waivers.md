@@ -6,7 +6,7 @@ survivor must be killed by a named test; raising the budget in CI requires a
 waiver recorded here with the mutant, the mutated code, and why no test can
 (or should) distinguish it.
 
-Campaign at time of writing: 411 mutants, 405 detected (98.5%), 6 waived.
+Campaign at time of writing: 452 mutants, 446 detected (98.7%), 6 waived.
 
 ## `mutmut_mcp.x__run_command__mutmut_13` — `shell=False` → `shell=None`
 
@@ -37,3 +37,10 @@ against `1`. No behavior difference is observable through the function.
 ## `mutmut_mcp.x__unresolved_note__mutmut_9` / `mutmut_11` — `status_counts.get(STATUS_INTERRUPTED, 0)` default → `None`
 
 Equivalent: same reasoning as the `STATUS_NOT_CHECKED` defaults above.
+
+## `mutmut_mcp.x__acquire_project__mutmut_4` — `acquire(blocking=False)` → `acquire(blocking=None)`
+
+Equivalent: `None` is falsy, so the call stays non-blocking. The line carries
+`# pragma: no mutate`; the Windows `msvcrt` branch of `_try_file_lock` is also
+excluded from mutation because CI runs on Linux. Neither affects the six
+waived ids above (no id renumbering).
