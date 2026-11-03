@@ -170,13 +170,14 @@ def test_running_jobs_are_never_evicted(tmp_path):
         _wait_done(second)
 
 
-def test_tool_schemas_list_eleven_tools_with_documented_signatures():
+def test_tool_schemas_list_twelve_tools_with_documented_signatures():
     async def names():
         return await mutmut_mcp.mcp.list_tools()
 
     tools = asyncio.run(names())
     by_name = {t.name: t for t in tools}
-    assert len(by_name) == 11
+    assert len(by_name) == 12
+    assert "mutant_context" in by_name
     assert {"start_mutmut_run", "mutmut_run_status"} <= set(by_name)
     assert set(by_name["start_mutmut_run"].parameters["properties"]) == {
         "target",

@@ -19,6 +19,7 @@ from mutmut_mcp import (
     _status_counts,
     _survivor_names,
     clean_mutmut_cache,
+    mutant_context,
     mutation_score,
     prioritize_survivors,
     rerun_mutmut_on_survivor,
@@ -593,6 +594,7 @@ class TestMutatingOperationLocks:
             ("show_results", False),
             ("show_survivors", False),
             ("show_mutant", False),
+            ("mutant_context", False),
             ("prioritize_survivors", False),
             ("mutation_score", False),
             ("mutmut_run_status", False),
@@ -823,6 +825,91 @@ class TestShowMutant:
     def test_empty_mutation_id(self):
         result = show_mutant("")
         assert "Error" in result
+
+
+# ---------------------------------------------------------------------------
+# mutant_context
+# ---------------------------------------------------------------------------
+
+
+class TestMutantContext:
+    @patch("mutmut_mcp._run_command")
+    def test_runs_both_commands_and_combines_output(self, mock_cmd):
+        mock_cmd.side_effect = [
+            _CommandOutcome("-  x = 1\n+  x = 2", failed=False),
+            _CommandOutcome("test_mod.py::test_a\ntests/test_b.py::TestB::test_c[1-2]\n", failed=False),
+        ]
+        result = mutant_context("mod.x_f__mutmut_1")
+        assert mock_cmd.call_count == 2
+        assert mock_cmd.call_args_list[0][0][0][1:] == ["show", "mod.x_f__mutmut_1"]
+        assert mock_cmd.call_args_list[1][0][0][1:] == ["tests-for-mutant", "mod.x_f__mutmut_1"]
+        assert result == {
+            "mutant_id": "mod.x_f__mutmut_1",
+            "diff": "-  x = 1\n+  x = 2",
+            "tests": ["test_mod.py::test_a", "tests/test_b.py::TestB::test_c[1-2]"],
+            "message": "",
+        }
+
+    @patch("mutmut_mcp._run_command")
+    def test_default_argv_uses_bare_mutmut(self, mock_cmd):
+        mock_cmd.return_value = _CommandOutcome("", failed=False)
+        mutant_context("m.x_f__mutmut_1")
+        assert [c[0][0] for c in mock_cmd.call_args_list] == [
+            ["mutmut", "show", "m.x_f__mutmut_1"],
+            ["mutmut", "tests-for-mutant", "m.x_f__mutmut_1"],
+        ]
+
+    @patch("mutmut_mcp._run_command")
+    def test_no_covering_test_is_empty_list(self, mock_cmd):
+        mock_cmd.side_effect = [_CommandOutcome("diff", failed=False), _CommandOutcome("", failed=False)]
+        result = mutant_context("m.x_f__mutmut_1")
+        assert result["tests"] == []
+        assert result["message"] == ""
+
+    @patch("mutmut_mcp._run_command")
+    def test_stderr_annotations_are_not_tests(self, mock_cmd):
+        mock_cmd.side_effect = [
+            _CommandOutcome("diff", failed=False),
+            _CommandOutcome("t.py::test_a\nWarning: a::b deprecated\nError: c::d\n", failed=False),
+        ]
+        assert mutant_context("m.x_f__mutmut_1")["tests"] == ["t.py::test_a"]
+
+    def test_empty_mutation_id(self):
+        result = mutant_context("")
+        assert result == {
+            "mutant_id": "",
+            "diff": "",
+            "tests": [],
+            "message": "Error: mutation_id is required.",
+        }
+
+    @patch("mutmut_mcp._run_command")
+    def test_tests_command_failure_keeps_diff(self, mock_cmd):
+        mock_cmd.side_effect = [
+            _CommandOutcome("the diff", failed=False),
+            _CommandOutcome("t.py::test_a\nError: boom", failed=True),
+        ]
+        result = mutant_context("m.x_f__mutmut_1")
+        assert result["diff"] == "the diff"
+        assert result["tests"] == []
+        assert result["message"] == "mutmut tests-for-mutant failed: t.py::test_a\nError: boom"
+
+    @patch("mutmut_mcp._run_command")
+    def test_show_command_failure_keeps_tests(self, mock_cmd):
+        mock_cmd.side_effect = [
+            _CommandOutcome("Error: no such mutant", failed=True),
+            _CommandOutcome("t.py::test_a\n", failed=False),
+        ]
+        result = mutant_context("m.x_f__mutmut_1")
+        assert result["tests"] == ["t.py::test_a"]
+        assert result["message"] == "mutmut show failed: Error: no such mutant"
+        assert result["diff"] == "Error: no such mutant"
+
+    @patch("mutmut_mcp._run_command")
+    def test_both_failures_are_reported(self, mock_cmd):
+        mock_cmd.return_value = _CommandOutcome("bad", failed=True)
+        message = mutant_context("m.x_f__mutmut_1")["message"]
+        assert message == "mutmut show failed: bad\nmutmut tests-for-mutant failed: bad"
 
 
 # ---------------------------------------------------------------------------
