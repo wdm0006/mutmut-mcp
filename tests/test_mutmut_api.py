@@ -1039,6 +1039,11 @@ class TestMutationScore:
             "killed": 3,
             "undetected": 2,
             "score": 0.5,
+            "by_function": [
+                {"function": "m.x_a", "total": 3, "killed": 2, "undetected": 1, "score": 0.6667},
+                {"function": "m.x_b", "total": 2, "killed": 0, "undetected": 1, "score": 0.0},
+                {"function": "m.x_c", "total": 1, "killed": 1, "undetected": 0, "score": 1.0},
+            ],
             "message": "3 of 6 mutants killed; 2 undetected.",
         }
         mock_cli.assert_called_once_with(["results", "--all", "true"], "/v", "/p")
@@ -1064,6 +1069,7 @@ class TestMutationScore:
             "killed": 0,
             "undetected": 0,
             "score": None,
+            "by_function": [],
             "message": "No mutation results yet - run a campaign first.",
         }
 
@@ -1081,6 +1087,10 @@ class TestMutationScore:
         assert result["score"] is None
         assert result["total"] == 2
         assert result["killed"] == 1
+        assert result["by_function"] == [
+            {"function": "m.a", "total": 1, "killed": 1, "undetected": 0, "score": None},
+            {"function": "m.b", "total": 1, "killed": 0, "undetected": 0, "score": None},
+        ]
         assert result["message"] == (
             f"Incomplete results, score not computed: {note} — run mutmut again for a complete picture."
         )
@@ -1094,6 +1104,7 @@ class TestMutationScore:
             "killed": 0,
             "undetected": 0,
             "score": None,
+            "by_function": [],
             "message": "Error: boom",
         }
 
@@ -1101,3 +1112,30 @@ class TestMutationScore:
     def test_junk_lines_are_not_counted(self, mock_cli):
         mock_cli.return_value = _CommandOutcome("    m.a: killed\nWarning: x: y\n", failed=False)
         assert mutation_score()["total"] == 1
+
+
+class TestMutationScoreByFunction:
+    @patch("mutmut_mcp._run_mutmut_cli")
+    def test_totals_sum_to_project_total_and_ties_sort_by_name(self, mock_cli):
+        mock_cli.return_value = _CommandOutcome(
+            "    m.x_z__mutmut_1: survived\n"
+            "    m.x_a__mutmut_1: survived\n"
+            "    m.x_a__mutmut_2: killed\n"
+            "    m.x_Cls__meth__mutmut_1: killed\n",
+            failed=False,
+        )
+        result = mutation_score()
+        assert [row["function"] for row in result["by_function"]] == ["m.x_a", "m.x_z", "m.x_Cls__meth"]
+        assert sum(row["total"] for row in result["by_function"]) == result["total"] == 4
+        assert result["by_function"][0] == {
+            "function": "m.x_a",
+            "total": 2,
+            "killed": 1,
+            "undetected": 1,
+            "score": 0.5,
+        }
+
+    def test_description_mentions_by_function_in_leading_prose(self):
+        tool = asyncio.run(mutmut_mcp.mcp.get_tool("mutation_score"))
+        assert tool is not None
+        assert "by_function" in (tool.description or "")
