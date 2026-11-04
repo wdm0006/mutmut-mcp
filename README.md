@@ -71,6 +71,16 @@ configuration (`[tool.mutmut]` in `pyproject.toml`), its source, its tests, and 
 `mutants/` state directory. Mutmut runs with that directory as its working directory, and
 `clean_mutmut_cache` removes state only from inside it.
 
+### Lock file
+
+`run_mutmut`, `start_mutmut_run`, `rerun_mutmut_on_survivor` and `clean_mutmut_cache` take a
+cross-process advisory lock on `<project_path>/.mutmut-mcp.lock` (created on first use, kept
+outside `mutants/` so cleaning does not delete it). A second MCP server, or any other process
+holding that lock, makes these tools return the "already in progress" error instead of
+corrupting mutmut's state; a plain terminal `mutmut run` does not take the lock. Read tools
+never lock. If the file cannot be created (read-only project) the server falls back to its
+in-process lock only. Add `.mutmut-mcp.lock` to your project's `.gitignore`.
+
 Pass it whenever the server was not launched from the project directory — which is typical for
 desktop MCP clients and `uvx`. Omitted, the tools fall back to the server process's working
 directory, so existing calls behave as before. A `project_path` that is not an existing directory

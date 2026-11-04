@@ -495,7 +495,8 @@ class TestMutatingOperationLocks:
             holder.join(timeout=1)
 
         assert result == (
-            f"Error: a mutmut operation is already in progress for {project}. "
+            f"Error: a mutmut operation is already in progress for {project} "
+            "(in this server or another process using the same project). "
             "Wait for it to finish before starting another."
         )
         mock_cli.assert_not_called()
@@ -544,7 +545,8 @@ class TestMutatingOperationLocks:
             lock.release()
 
         assert result == (
-            f"Error: a mutmut operation is already in progress for {canonical_project}. "
+            f"Error: a mutmut operation is already in progress for {canonical_project} "
+            "(in this server or another process using the same project). "
             "Wait for it to finish before starting another."
         )
         mock_cli.assert_not_called()
