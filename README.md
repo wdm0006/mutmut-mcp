@@ -61,6 +61,7 @@ The following tools are available:
 - `rerun_mutmut_on_survivor(mutation_id=None, venv_path=None, project_path=None)` – Rerun a specific mutant (`mutmut run <name>`) or all surviving mutants
 - `clean_mutmut_cache(venv_path=None, project_path=None)` – Remove mutmut's `mutants/` state directory and legacy cache for the project
 - `show_mutant(mutation_id, venv_path=None, project_path=None)` – Show the code diff and details for one named mutant
+- `mutant_context(mutation_id, venv_path=None, project_path=None)` – `{mutant_id, diff, tests, message}`: the mutant's diff plus the pytest ids covering it (`mutmut show` + `mutmut tests-for-mutant`); an empty `tests` list means no test covers it
 - `prioritize_survivors(venv_path=None, project_path=None)` – Rank survivors and uncovered mutants by likely materiality, highest score first
 - `mutation_score(venv_path=None, project_path=None)` – Killed/total counts and the mutation score (`null` when there are no results or the run is incomplete) from one `mutmut results --all true` read
 

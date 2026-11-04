@@ -779,6 +779,42 @@ def show_mutant(mutation_id: str, venv_path: Optional[str] = None, project_path:
     return _run_mutmut_cli(["show", mutation_id], venv_path, project_path).output
 
 
+def _parse_tests(output: str) -> list[str]:
+    """Pytest node ids from `mutmut tests-for-mutant` (one `path::test` per line), ignoring stderr annotations."""
+    return [
+        line.strip() for line in output.splitlines() if "::" in line and not line.startswith(("Warning:", "Error:"))
+    ]
+
+
+@mcp.tool()
+def mutant_context(mutation_id: str, venv_path: Optional[str] = None, project_path: Optional[str] = None) -> dict:
+    """
+    Show a mutant's diff together with the tests that already exercise it, in one read-only call.
+
+    Runs `mutmut show <name>` and `mutmut tests-for-mutant <name>`. Returns
+    `{mutant_id, diff, tests, message}`; `tests` lists pytest node ids (an empty list means
+    no test covers the mutant, matching the `no tests` status). If either command fails, the
+    error is reported in `message` and the other field is still populated.
+    Args:
+        mutation_id (str): The ID of the mutant to inspect.
+        venv_path (Optional[str]): Path to the virtual environment, if any. A relative path is
+            resolved against `project_path`.
+        project_path (Optional[str]): Directory holding the project's mutmut configuration and state.
+            Defaults to the server's working directory.
+    """
+    if not mutation_id:
+        return {"mutant_id": "", "diff": "", "tests": [], "message": "Error: mutation_id is required."}
+    shown = _run_mutmut_cli(["show", mutation_id], venv_path, project_path)
+    covering = _run_mutmut_cli(["tests-for-mutant", mutation_id], venv_path, project_path)
+    tests = [] if covering.failed else _parse_tests(covering.output)
+    message = "".join(
+        f"{label} failed: {outcome.output}\n"
+        for label, outcome in (("mutmut show", shown), ("mutmut tests-for-mutant", covering))
+        if outcome.failed
+    )
+    return {"mutant_id": mutation_id, "diff": shown.output, "tests": tests, "message": message.strip()}
+
+
 # The return annotation stays a bare `dict`: fastmcp derives the tool's output
 # schema from it, and a TypedDict here would change the declared MCP schema.
 # The entry shape is pinned by _RankedMutant instead.

@@ -14,6 +14,7 @@ import pytest
 from mutmut_mcp import (
     _parse_results,
     clean_mutmut_cache,
+    mutant_context,
     prioritize_survivors,
     run_mutmut,
     show_results,
@@ -172,3 +173,18 @@ def test_background_run_against_real_cli(mutmut_project):
     assert "\r" not in status["output_tail"]
     assert status["progress"] is not None
     assert (mutmut_project / "mutants").is_dir()
+
+
+def test_mutant_context_against_real_cli(partly_tested_project):
+    """`tests-for-mutant` prints one `path::test` per line; an uncovered mutant prints nothing."""
+    run_mutmut(options="--max-children 1")
+
+    covered = mutant_context("foo.x_add__mutmut_1")
+    assert covered["tests"] == ["test_foo.py::test_add"], covered
+    assert covered["message"] == ""
+    assert "return" in covered["diff"]
+
+    uncovered = mutant_context("foo.x_untested_discount__mutmut_1")
+    assert uncovered["tests"] == [], uncovered
+    assert uncovered["message"] == ""
+    assert "price" in uncovered["diff"]
